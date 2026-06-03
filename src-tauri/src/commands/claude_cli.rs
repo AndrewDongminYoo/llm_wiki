@@ -53,7 +53,7 @@ pub struct ClaudeMessage {
     content: String,
 }
 
-fn find_claude_command() -> Result<PathBuf, String> {
+async fn find_claude_command() -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
         if let Ok(path) = which::which("claude.cmd") {
@@ -64,7 +64,74 @@ fn find_claude_command() -> Result<PathBuf, String> {
         }
     }
 
-    which::which("claude").map_err(|_| "`claude` not found on PATH".to_string())
+    // 1) Current process PATH first — succeeds when the app was
+    //    launched from a terminal that already exported the user's
+    //    full shell PATH (`pnpm tauri dev`, CI, etc).
+    if let Ok(path) = which::which("claude") {
+        return Ok(path);
+    }
+
+    // macOS GUI launches (Finder, `open Foo.app`, Dock) inherit only
+    // launchd's minimal PATH — typically `/usr/bin:/bin:/usr/sbin:/sbin`
+    // plus whatever path_helper adds from `/etc/paths(.d)` — so
+    // Homebrew, bun, pnpm, npm-global, etc. install dirs are invisible
+    // to `which`. Scan the well-known locations directly, and if that
+    // fails, ask the user's login+interactive shell to resolve it.
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let candidates: [PathBuf; 6] = [
+            PathBuf::from("/opt/homebrew/bin/claude"),
+            PathBuf::from("/usr/local/bin/claude"),
+            PathBuf::from(format!("{home}/.bun/bin/claude")),
+            PathBuf::from(format!("{home}/.npm-global/bin/claude")),
+            PathBuf::from(format!("{home}/.local/bin/claude")),
+            PathBuf::from(format!("{home}/Library/pnpm/claude")),
+        ];
+        for candidate in candidates {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+
+        // Fallback: spawn the user's login+interactive shell so PATH
+        // mutations in .zprofile and .zshrc (nvm, mise, asdf, custom
+        // dirs) take effect, then ask it to resolve `claude`. Hard
+        // timeout because a broken rc file that blocks on network or
+        // input would otherwise freeze the settings panel.
+        //
+        // Some .zshrc files print banners to stdout, so don't trust
+        // the last line blindly — scan lines in reverse and accept the
+        // first one whose basename is `claude` AND that actually exists
+        // as a file.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let resolved = tokio::time::timeout(
+            Duration::from_secs(2),
+            Command::new(&shell)
+                .args(["-ilc", "command -v claude"])
+                .output(),
+        )
+        .await;
+
+        if let Ok(Ok(out)) = resolved {
+            if out.status.success() {
+                let raw = String::from_utf8_lossy(&out.stdout);
+                for line in raw.lines().rev() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let candidate = PathBuf::from(line);
+                    let name_matches = candidate.file_name().is_some_and(|n| n == "claude");
+                    if name_matches && candidate.is_file() {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    Err("`claude` not found on PATH or in common install locations".to_string())
 }
 
 /// Locate `claude` on PATH and confirm it's runnable by calling
@@ -72,7 +139,7 @@ fn find_claude_command() -> Result<PathBuf, String> {
 /// mount of the settings panel.
 #[tauri::command]
 pub async fn claude_cli_detect() -> Result<DetectResult, String> {
-    let path = match find_claude_command() {
+    let path = match find_claude_command().await {
         Ok(p) => p,
         Err(error) => {
             return Ok(DetectResult {
@@ -187,7 +254,7 @@ pub async fn claude_cli_spawn(
         })
         .collect();
 
-    let claude = find_claude_command()?;
+    let claude = find_claude_command().await?;
     let mut cmd = Command::new(&claude);
     cmd.arg("-p")
         .arg("--output-format")
