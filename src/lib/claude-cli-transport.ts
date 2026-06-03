@@ -143,6 +143,16 @@ export async function streamClaudeCodeCli(
   let unlistenData: UnlistenFn | undefined
   let unlistenDone: UnlistenFn | undefined
   let finished = false
+  // The Rust `claude_cli_spawn` invoke resolves immediately after
+  // registering listener tasks — long before the child has emitted a
+  // single byte. Without this gate, our outer `await` would return
+  // synchronously and callers like testLlmConnection would read an
+  // empty `content` before any `onToken` fired. Pattern mirrors
+  // codex-cli-transport.ts.
+  let resolveCompletion: () => void = () => {}
+  const completion = new Promise<void>((resolve) => {
+    resolveCompletion = resolve
+  })
 
   // Diagnostic capture for failure paths. The Rust side emits every
   // stdout line; lines the parser doesn't recognize (non-JSON,
@@ -173,6 +183,7 @@ export async function streamClaudeCodeCli(
     finished = true
     cleanup()
     cb()
+    resolveCompletion()
   }
 
   const abortListener = () => {
@@ -222,6 +233,11 @@ export async function streamClaudeCodeCli(
       messages,
     }
     await invoke("claude_cli_spawn", payload)
+    // The invoke above merely tells Rust to spawn the child + register
+    // its stdout drain task; it does NOT wait for output. Block here
+    // until finishWith() resolves the completion promise (i.e. the
+    // child has exited or aborted).
+    await completion
   } catch (err) {
     finishWith(() => {
       const message = err instanceof Error ? err.message : String(err)
