@@ -143,12 +143,12 @@ export async function streamClaudeCodeCli(
   let unlistenData: UnlistenFn | undefined
   let unlistenDone: UnlistenFn | undefined
   let finished = false
-  // The Rust `claude_cli_spawn` invoke resolves immediately after
-  // registering listener tasks — long before the child has emitted a
-  // single byte. Without this gate, our outer `await` would return
-  // synchronously and callers like testLlmConnection would read an
-  // empty `content` before any `onToken` fired. Pattern mirrors
-  // codex-cli-transport.ts.
+  let aborted = signal?.aborted ?? false
+  // Track whether any assistant text was received — used to detect the
+  // silent-exit case where the CLI exits 0 but emits no content.
+  let emittedToken = false
+  // Completion promise: resolves when finishWith() fires so the caller
+  // awaits the full round-trip rather than returning after spawn.
   let resolveCompletion: () => void = () => {}
   const completion = new Promise<void>((resolve) => {
     resolveCompletion = resolve
@@ -187,11 +187,16 @@ export async function streamClaudeCodeCli(
   }
 
   const abortListener = () => {
+    aborted = true
     void invoke("claude_cli_kill", { streamId }).catch(() => {
       // Kill is best-effort; if the process already exited, the Rust
       // side returns Ok and the done handler fires normally.
     })
     finishWith(onDone)
+  }
+  if (aborted) {
+    finishWith(onDone)
+    return
   }
   signal?.addEventListener("abort", abortListener)
 
@@ -200,6 +205,7 @@ export async function streamClaudeCodeCli(
     unlistenData = await listen<string>(`claude-cli:${streamId}`, (event) => {
       const token = parse(event.payload)
       if (token !== null) {
+        emittedToken = true
         onToken(token)
       } else {
         // Parser didn't recognize this line. Stash it in case the
@@ -209,6 +215,10 @@ export async function streamClaudeCodeCli(
         captureUnparsed(event.payload)
       }
     })
+    if (aborted || finished) {
+      cleanup()
+      return
+    }
 
     unlistenDone = await listen<{ code: number | null; stderr: string }>(
       `claude-cli:${streamId}:done`,
@@ -221,11 +231,27 @@ export async function streamClaudeCodeCli(
               new Error(buildExitError(code, stderr, unparsedLines.join("\n"))),
             ),
           )
+        } else if (!emittedToken) {
+          // CLI exited successfully but produced no assistant text.
+          // Surface this as an explicit error so the ingest pipeline
+          // retries rather than silently writing an empty stub page.
+          const details = stderr || unparsedLines.join("\n").trim()
+          finishWith(() =>
+            onError(new Error(
+              details
+                ? `Claude Code CLI completed but returned no content:\n${details}`
+                : "Claude Code CLI completed but returned no content. Try running `claude -p` in a terminal to inspect the output, or switch to the Anthropic API in Settings.",
+            )),
+          )
         } else {
           finishWith(onDone)
         }
       },
     )
+    if (aborted || finished) {
+      cleanup()
+      return
+    }
 
     const payload: SpawnPayload = {
       streamId,
@@ -233,10 +259,17 @@ export async function streamClaudeCodeCli(
       messages,
     }
     await invoke("claude_cli_spawn", payload)
-    // The invoke above merely tells Rust to spawn the child + register
-    // its stdout drain task; it does NOT wait for output. Block here
-    // until finishWith() resolves the completion promise (i.e. the
-    // child has exited or aborted).
+    if (aborted || signal?.aborted) {
+      aborted = true
+      await invoke("claude_cli_kill", { streamId }).catch(() => {})
+      finishWith(onDone)
+      return
+    }
+    // Wait for the done event to be processed before returning.
+    // Without this await the caller sees an empty analysis buffer
+    // because streamClaudeCodeCli() resolves immediately after spawn
+    // while the CLI subprocess is still running. (Same race that was
+    // fixed for the Codex CLI transport in #238.)
     await completion
   } catch (err) {
     finishWith(() => {
