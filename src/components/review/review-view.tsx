@@ -18,6 +18,7 @@ import { writeFile, readFile, listDirectory, deleteFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import { hasConfiguredDeepResearchSources } from "@/lib/web-search"
 import { makeQueryFileName } from "@/lib/wiki-filename"
+import { buildWikiFrontmatter } from "@/lib/wiki-frontmatter"
 import { useTranslation } from "react-i18next"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; label: string; color: string }> = {
@@ -76,7 +77,13 @@ export function ReviewView() {
         const { date, fileName } = makeQueryFileName(title)
         const filePath = `${pp}/wiki/queries/${fileName}`
 
-        const frontmatter = `---\ntype: query\ntitle: "${title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\n---\n\n`
+        const frontmatter = buildWikiFrontmatter({
+          type: "query",
+          title,
+          date,
+          tags: [],
+          related: [],
+        })
         const pageContent = frontmatter + cleanContent
         await writeFile(filePath, pageContent)
 
@@ -185,7 +192,13 @@ export function ReviewView() {
           const dir = pageType === "query" ? "queries" : pageType === "entity" ? "entities" : pageType === "concept" ? "concepts" : "queries"
           const filePath = `${pp}/wiki/${dir}/${fileName}`
 
-          const frontmatter = `---\ntype: ${pageType}\ntitle: "${title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\nrelated: []\n---\n\n`
+          const frontmatter = buildWikiFrontmatter({
+            type: pageType,
+            title,
+            date,
+            tags: [],
+            related: [],
+          })
           const body = `# ${title}\n\n${item.description}\n`
           const pageContent = frontmatter + body
           await writeFile(filePath, pageContent)

@@ -196,6 +196,87 @@ describe("ingest scenarios (fixture-driven)", () => {
     },
   )
 
+  it("drops schema-invalid generated pages when schema.md is present", async () => {
+    ctx = { tmp: await createTempProject("ingest-schema-invalid-page") }
+    const projectPath = ctx.tmp.path
+
+    await writeFileRaw(
+      `${projectPath}/schema.md`,
+      [
+        "# Wiki Schema",
+        "",
+        "## Page Types",
+        "",
+        "| Type | Directory | Purpose |",
+        "| ---- | --------- | ------- |",
+        "| concept | wiki/concepts/ | Ideas |",
+        "",
+        "## Frontmatter",
+        "",
+        "All pages must include YAML frontmatter:",
+        "```yaml",
+        "---",
+        "type: concept",
+        "title: Human-readable title",
+        "tags: []",
+        "related: []",
+        "created: YYYY-MM-DD",
+        "updated: YYYY-MM-DD",
+        "---",
+        "```",
+      ].join("\n"),
+    )
+    await writeFileRaw(`${projectPath}/purpose.md`, "")
+    await writeFileRaw(`${projectPath}/wiki/index.md`, "# Index\n")
+    await writeFileRaw(`${projectPath}/wiki/overview.md`, "# Overview\n")
+    await writeFileRaw(`${projectPath}/raw/sources/schema-test.md`, "source\n")
+
+    useWikiStore.setState({
+      project: {
+        name: "t",
+        path: projectPath,
+        createdAt: 0,
+        purposeText: "",
+        fileTree: [],
+      } as unknown as ReturnType<typeof useWikiStore.getState>["project"],
+    })
+    useWikiStore.getState().setLlmConfig({
+      provider: "openai",
+      apiKey: "test-key",
+      model: "gpt-4",
+      ollamaUrl: "",
+      customEndpoint: "",
+      maxContextSize: 128000,
+    })
+
+    pendingResponses = [
+      "analysis",
+      [
+        "---FILE: wiki/concepts/bad-tags.md---",
+        "---",
+        "type: concept",
+        "title: Bad Tags",
+        "tags: not-an-array",
+        "related: []",
+        "created: 2026-06-05",
+        "updated: 2026-06-05",
+        "---",
+        "",
+        "# Bad Tags",
+        "---END FILE---",
+      ].join("\n"),
+    ]
+
+    const written = await autoIngest(
+      projectPath,
+      `${projectPath}/raw/sources/schema-test.md`,
+      useWikiStore.getState().llmConfig,
+    )
+
+    expect(written).not.toContain("wiki/concepts/bad-tags.md")
+    expect(await fileExists(`${projectPath}/wiki/concepts/bad-tags.md`)).toBe(false)
+  })
+
   it("keeps source summaries distinct for same basenames in different source folders", async () => {
     ctx = { tmp: await createTempProject("ingest-duplicate-source-basenames") }
     const projectPath = ctx.tmp.path

@@ -58,6 +58,7 @@ export function LintView() {
     orphan: { icon: Unlink, label: t("lint.typeLabels.orphan") },
     "broken-link": { icon: Link2Off, label: t("lint.typeLabels.broken-link") },
     "no-outlinks": { icon: ArrowUpRight, label: t("lint.typeLabels.no-outlinks") },
+    schema: { icon: AlertTriangle, label: t("lint.typeLabels.schema") },
     semantic: { icon: BrainCircuit, label: t("lint.typeLabels.semantic") },
   }), [t])
 

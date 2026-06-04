@@ -9,6 +9,7 @@ describe("inferWikiTypeFromPath", () => {
     expect(inferWikiTypeFromPath("/project/wiki/queries/open-question.md")).toBe("query")
     expect(inferWikiTypeFromPath("/project/wiki/comparisons/model-a-vs-b.md")).toBe("comparison")
     expect(inferWikiTypeFromPath("/project/wiki/synthesis/summary.md")).toBe("synthesis")
+    expect(inferWikiTypeFromPath("/project/wiki/business/refrigerator-pick.md")).toBe("business")
   })
 
   it("recognizes research-template wiki directories", () => {
@@ -40,5 +41,6 @@ describe("wikiTypeLabel", () => {
     expect(GENERATION_WIKI_TYPES).toContain("finding")
     expect(GENERATION_WIKI_TYPES).toContain("thesis")
     expect(GENERATION_WIKI_TYPES).toContain("methodology")
+    expect(GENERATION_WIKI_TYPES).toContain("business")
   })
 })

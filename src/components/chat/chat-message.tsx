@@ -19,6 +19,7 @@ import type { FileNode } from "@/types/wiki"
 import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
 import { normalizePath, getFileName } from "@/lib/path-utils"
 import { makeQueryFileName } from "@/lib/wiki-filename"
+import { buildWikiFrontmatter } from "@/lib/wiki-frontmatter"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
 import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
@@ -187,15 +188,13 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
         .replace(/<think(?:ing)?>\s*[\s\S]*$/gi, "")
         .trimEnd()
 
-      const frontmatter = [
-        "---",
-        `type: query`,
-        `title: "${title.replace(/"/g, '\\"')}"`,
-        `created: ${date}`,
-        `tags: []`,
-        "---",
-        "",
-      ].join("\n")
+      const frontmatter = buildWikiFrontmatter({
+        type: "query",
+        title,
+        date,
+        tags: [],
+        related: [],
+      })
 
       await writeFile(filePath, frontmatter + cleanContent)
 

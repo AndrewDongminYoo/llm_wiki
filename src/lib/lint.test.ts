@@ -11,17 +11,19 @@ vi.mock("@/commands/fs", () => ({
   readFile: vi.fn(),
   writeFile: vi.fn(),
   listDirectory: vi.fn(),
+  fileExists: vi.fn(),
 }))
 
-import { runSemanticLint } from "./lint"
+import { runSemanticLint, runStructuralLint } from "./lint"
 import { streamChat } from "./llm-client"
-import { readFile, listDirectory } from "@/commands/fs"
+import { readFile, listDirectory, fileExists } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useActivityStore } from "@/stores/activity-store"
 
 const mockStreamChat = vi.mocked(streamChat)
 const mockReadFile = vi.mocked(readFile)
 const mockListDirectory = vi.mocked(listDirectory)
+const mockFileExists = vi.mocked(fileExists)
 
 function fakeLlmConfig(): LlmConfig {
   return {
@@ -50,6 +52,8 @@ beforeEach(() => {
   mockStreamChat.mockReset()
   mockReadFile.mockReset()
   mockListDirectory.mockReset()
+  mockFileExists.mockReset()
+  mockFileExists.mockResolvedValue(false)
   useWikiStore.getState().setOutputLanguage("auto")
   useActivityStore.setState({ items: [] })
 })
@@ -150,5 +154,208 @@ describe("runSemanticLint — activity & early returns", () => {
     await runSemanticLint("/project", fakeLlmConfig())
     const items = useActivityStore.getState().items
     expect(items[0].status).toBe("error")
+  })
+})
+
+describe("runStructuralLint — project schema", () => {
+  it("reports frontmatter and directory violations when schema.md is present", async () => {
+    const wikiTree = [
+      {
+        name: "business",
+        path: "/project/wiki/business",
+        is_dir: true,
+        children: [
+          {
+            name: "refrigerator-pick.md",
+            path: "/project/wiki/business/refrigerator-pick.md",
+            is_dir: false,
+            children: [],
+          } as FileNode,
+        ],
+      } as FileNode,
+      {
+        name: "index.md",
+        path: "/project/wiki/index.md",
+        is_dir: false,
+        children: [],
+      } as FileNode,
+    ]
+    mockListDirectory.mockResolvedValue(wikiTree)
+    mockReadFile.mockImplementation(async (path) => {
+      if (path === "/project/schema.md") {
+        return [
+          "# Wiki Schema",
+          "",
+          "## Page Types",
+          "",
+          "| Type | Directory | Purpose |",
+          "| ---- | --------- | ------- |",
+          "| concept | wiki/concepts/ | Ideas |",
+          "| business | wiki/business/ | Product background |",
+          "",
+          "## Frontmatter",
+          "",
+          "All pages must include YAML frontmatter:",
+          "```yaml",
+          "---",
+          "type: concept | business",
+          "title: Human-readable title",
+          "tags: []",
+          "related: []",
+          "created: YYYY-MM-DD",
+          "updated: YYYY-MM-DD",
+          "---",
+          "```",
+          "",
+          "Business pages also include:",
+          "```yaml",
+          "key: <original-kb-key>",
+          "aliases: []",
+          "status: active | paused | inactive",
+          "```",
+        ].join("\n")
+      }
+      if (path === "/project/wiki/index.md") {
+        return "# Index\n"
+      }
+      return [
+        "---",
+        "type: concept",
+        "title: Refrigerator Pick",
+        "created: 2026-06-05",
+        "tags: []",
+        "---",
+        "",
+        "# Refrigerator Pick",
+      ].join("\n")
+    })
+
+    const results = await runStructuralLint("/project")
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "schema",
+          severity: "warning",
+          page: "business/refrigerator-pick.md",
+          detail: expect.stringContaining('Page type "concept" must be under "wiki/concepts/"'),
+        }),
+        expect.objectContaining({
+          type: "schema",
+          severity: "warning",
+          page: "business/refrigerator-pick.md",
+          detail: expect.stringContaining('Missing frontmatter field "updated"'),
+        }),
+      ]),
+    )
+  })
+
+  it("reports unresolved related and sources frontmatter references", async () => {
+    const wikiTree = [
+      {
+        name: "concepts",
+        path: "/project/wiki/concepts",
+        is_dir: true,
+        children: [
+          {
+            name: "known.md",
+            path: "/project/wiki/concepts/known.md",
+            is_dir: false,
+            children: [],
+          } as FileNode,
+          {
+            name: "needs-refs.md",
+            path: "/project/wiki/concepts/needs-refs.md",
+            is_dir: false,
+            children: [],
+          } as FileNode,
+        ],
+      } as FileNode,
+      {
+        name: "index.md",
+        path: "/project/wiki/index.md",
+        is_dir: false,
+        children: [],
+      } as FileNode,
+    ]
+    mockListDirectory.mockResolvedValue(wikiTree)
+    mockReadFile.mockImplementation(async (path) => {
+      if (path === "/project/schema.md") {
+        return [
+          "# Wiki Schema",
+          "",
+          "## Page Types",
+          "",
+          "| Type | Directory | Purpose |",
+          "| ---- | --------- | ------- |",
+          "| concept | wiki/concepts/ | Ideas |",
+          "",
+          "## Frontmatter",
+          "",
+          "All pages must include YAML frontmatter:",
+          "```yaml",
+          "---",
+          "type: concept",
+          "title: Human-readable title",
+          "tags: []",
+          "related: []",
+          "created: YYYY-MM-DD",
+          "updated: YYYY-MM-DD",
+          "---",
+          "```",
+        ].join("\n")
+      }
+      if (path === "/project/wiki/index.md") {
+        return "- [[known]] — Known\n- [[needs-refs]] — Needs refs\n"
+      }
+      if (path === "/project/wiki/concepts/known.md") {
+        return [
+          "---",
+          "type: concept",
+          "title: Known",
+          "tags: []",
+          "related: [needs-refs]",
+          "created: 2026-06-05",
+          "updated: 2026-06-05",
+          "---",
+          "",
+          "# Known",
+          "",
+          "See [[needs-refs]].",
+        ].join("\n")
+      }
+      return [
+        "---",
+        "type: concept",
+        "title: Needs Refs",
+        "tags: []",
+        "related: [missing-page]",
+        "sources: [raw/sources/missing.md]",
+        "created: 2026-06-05",
+        "updated: 2026-06-05",
+        "---",
+        "",
+        "# Needs Refs",
+        "",
+        "See [[known]].",
+      ].join("\n")
+    })
+
+    const results = await runStructuralLint("/project")
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "schema",
+          page: "concepts/needs-refs.md",
+          detail: 'Missing related page: "missing-page"',
+        }),
+        expect.objectContaining({
+          type: "schema",
+          page: "concepts/needs-refs.md",
+          detail: 'Missing source path: "raw/sources/missing.md"',
+        }),
+      ]),
+    )
   })
 })

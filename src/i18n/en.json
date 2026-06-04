@@ -153,7 +153,7 @@
     "running": "Running...",
     "runLint": "Run Lint",
     "runLintHint": "Run lint to check wiki health",
-    "runLintDescription": "Checks for orphan pages, broken links, and more",
+    "runLintDescription": "Checks for orphan pages, broken links, schema violations, and more",
     "allClear": "All clear!",
     "noIssues": "No issues found.",
     "warnings": "Warnings",
@@ -174,6 +174,7 @@
       "orphan": "Orphan Page",
       "broken-link": "Broken Link",
       "no-outlinks": "No Outbound Links",
+      "schema": "Schema Violation",
       "semantic": "Semantic Issue"
     },
     "issues": "{{count}} issue",

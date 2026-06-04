@@ -1,13 +1,18 @@
-import { readFile, listDirectory } from "@/commands/fs"
+import { readFile, listDirectory, fileExists } from "@/commands/fs"
 import { streamChat } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 import { useActivityStore } from "@/stores/activity-store"
 import { getFileName, getRelativePath, normalizePath } from "@/lib/path-utils"
 import { buildLanguageDirective } from "@/lib/output-language"
+import {
+  loadProjectWikiSchema,
+  validateWikiPageAgainstSchema,
+} from "@/lib/wiki-schema"
+import { parseFrontmatter } from "@/lib/frontmatter"
 
 export interface LintResult {
-  type: "orphan" | "broken-link" | "no-outlinks" | "semantic"
+  type: "orphan" | "broken-link" | "no-outlinks" | "schema" | "semantic"
   severity: "warning" | "info"
   page: string
   detail: string
@@ -43,6 +48,44 @@ function relativeToSlug(relativePath: string): string {
   return relativePath.replace(/\.md$/, "")
 }
 
+function wikilinkTargetToSlug(raw: string): string {
+  const head = raw.split("|")[0]?.split("#")[0]?.trim() ?? ""
+  const basename = head.includes("/")
+    ? head.substring(head.lastIndexOf("/") + 1)
+    : head
+  return basename.replace(/\.md$/, "")
+}
+
+const URL_HOST_PATTERN = /^([a-z0-9][a-z0-9-]*\.)+[a-z]{2,}\b/i
+
+function isCitationSource(value: string): boolean {
+  const trimmed = value.trim()
+  return (
+    /^https?:\/\//.test(trimmed) ||
+    /^\s*\[[^\]]+\]\([^)]+\)/.test(trimmed) ||
+    /\s—\s/.test(trimmed) ||
+    URL_HOST_PATTERN.test(trimmed)
+  )
+}
+
+function parentDir(path: string): string {
+  const normalized = normalizePath(path).replace(/\/+$/, "")
+  const index = normalized.lastIndexOf("/")
+  return index > 0 ? normalized.slice(0, index) : normalized
+}
+
+function sourcePathCandidates(projectPath: string, source: string): string[] {
+  const pp = normalizePath(projectPath).replace(/\/+$/, "")
+  const trimmed = source.trim().replace(/^\/+/, "")
+  const candidates = new Set<string>()
+  candidates.add(`${pp}/${trimmed}`)
+  if (!trimmed.startsWith("raw/") && !trimmed.startsWith("wiki/")) {
+    candidates.add(`${pp}/raw/sources/${trimmed}`)
+    candidates.add(`${parentDir(pp)}/${trimmed}`)
+  }
+  return Array.from(candidates)
+}
+
 /**
  * Build a slug → absolute path map from wiki files. Keys are lowercased
  * so [[Transformer]] matches transformer.md — wikilink matching should
@@ -64,10 +107,135 @@ function buildSlugMap(
   return map
 }
 
+async function validateFrontmatterReferences(
+  projectPath: string,
+  page: string,
+  content: string,
+  knownSlugs: Set<string>,
+): Promise<LintResult[]> {
+  const parsed = parseFrontmatter(content)
+  const fm = parsed.frontmatter
+  if (!fm) return []
+
+  const results: LintResult[] = []
+  const related = fm.related
+  if (Array.isArray(related)) {
+    for (const target of related) {
+      const slug = wikilinkTargetToSlug(target).toLowerCase()
+      if (slug && !knownSlugs.has(slug)) {
+        results.push({
+          type: "schema",
+          severity: "warning",
+          page,
+          detail: `Missing related page: "${target}"`,
+        })
+      }
+    }
+  }
+
+  const sources = fm.sources
+  if (Array.isArray(sources)) {
+    for (const source of sources) {
+      if (isCitationSource(source)) continue
+      const trimmed = source.trim()
+      if (!trimmed) continue
+
+      if (/\.md$/i.test(trimmed) && !trimmed.includes("/")) {
+        const slug = trimmed.replace(/\.md$/i, "").toLowerCase()
+        if (knownSlugs.has(slug)) continue
+      }
+
+      let found = false
+      for (const candidate of sourcePathCandidates(projectPath, trimmed)) {
+        if (await fileExists(candidate)) {
+          found = true
+          break
+        }
+      }
+      if (!found) {
+        results.push({
+          type: "schema",
+          severity: "warning",
+          page,
+          detail: `Missing source path: "${source}"`,
+        })
+      }
+    }
+  }
+
+  return results
+}
+
+interface OpenFence {
+  char: "`" | "~"
+  length: number
+  lineNumber: number
+}
+
+function validateCodeFences(page: string, markdown: string): LintResult[] {
+  const results: LintResult[] = []
+  let openFence: OpenFence | null = null
+
+  markdown.split("\n").forEach((line, index) => {
+    const lineNumber = index + 1
+    const match = line.match(/^(\s{0,3})(`{3,}|~{3,})(.*)$/)
+    if (!match) return
+
+    const fence = match[2]
+    const rest = match[3].trim()
+    const char = fence[0] as "`" | "~"
+    const length = fence.length
+
+    if (openFence) {
+      const isClosingFence =
+        char === openFence.char &&
+        length >= openFence.length &&
+        rest.length === 0
+      if (isClosingFence) openFence = null
+      return
+    }
+
+    const languageId = rest.split(/\s+/)[0] ?? ""
+    if (!languageId) {
+      results.push({
+        type: "schema",
+        severity: "warning",
+        page,
+        detail: `Line ${lineNumber}: fenced code block must specify a language id.`,
+      })
+      return
+    }
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(languageId)) {
+      results.push({
+        type: "schema",
+        severity: "warning",
+        page,
+        detail: `Line ${lineNumber}: invalid code fence language id "${languageId}".`,
+      })
+    }
+
+    openFence = { char, length, lineNumber }
+  })
+
+  const danglingFence = openFence as OpenFence | null
+  if (danglingFence) {
+    results.push({
+      type: "schema",
+      severity: "warning",
+      page,
+      detail: `Line ${danglingFence.lineNumber}: unclosed fenced code block.`,
+    })
+  }
+
+  return results
+}
+
 // ── Structural lint ───────────────────────────────────────────────────────────
 
 export async function runStructuralLint(projectPath: string): Promise<LintResult[]> {
-  const wikiRoot = `${normalizePath(projectPath)}/wiki`
+  const pp = normalizePath(projectPath)
+  const wikiRoot = `${pp}/wiki`
   let tree: FileNode[]
   try {
     tree = await listDirectory(wikiRoot)
@@ -75,7 +243,11 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
     return []
   }
 
+  const projectSchema = await loadProjectWikiSchema(pp)
   const wikiFiles = flattenMdFiles(tree)
+  const knownSlugs = new Set(
+    wikiFiles.map((f) => f.name.replace(/\.md$/, "").toLowerCase()),
+  )
   // Exclude index.md and log.md from orphan checks
   const contentFiles = wikiFiles.filter(
     (f) => f.name !== "index.md" && f.name !== "log.md"
@@ -115,6 +287,28 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
 
   for (const p of pages) {
     const shortName = getRelativePath(p.path, wikiRoot)
+    const wikiRelativePath = `wiki/${shortName}`
+
+    if (projectSchema) {
+      const schemaIssues = validateWikiPageAgainstSchema(
+        wikiRelativePath,
+        p.content,
+        projectSchema,
+      )
+      for (const issue of schemaIssues) {
+        results.push({
+          type: "schema",
+          severity: "warning",
+          page: shortName,
+          detail: issue.message,
+        })
+      }
+      const parsed = parseFrontmatter(p.content)
+      results.push(...validateCodeFences(shortName, parsed.body))
+      results.push(
+        ...(await validateFrontmatterReferences(pp, shortName, p.content, knownSlugs)),
+      )
+    }
 
     // Orphan: no inbound links (lowercased slug for case-insensitive match)
     const inbound = inboundCounts.get(p.slug.toLowerCase()) ?? 0
@@ -148,6 +342,50 @@ export async function runStructuralLint(projectPath: string): Promise<LintResult
           severity: "warning",
           page: shortName,
           detail: `Broken link: [[${link}]] — target page not found.`,
+        })
+      }
+    }
+  }
+
+  if (projectSchema) {
+    const indexFile = wikiFiles.find((f) => f.name === "index.md")
+    if (!indexFile) {
+      results.push({
+        type: "schema",
+        severity: "warning",
+        page: "index.md",
+        detail: "Missing wiki/index.md",
+      })
+    } else {
+      try {
+        const indexContent = await readFile(indexFile.path)
+        const indexLinks = new Set(
+          extractWikilinks(indexContent).map((link) =>
+            wikilinkTargetToSlug(link).toLowerCase(),
+          ),
+        )
+        for (const p of pages) {
+          const parsed = parseFrontmatter(p.content)
+          const type = Array.isArray(parsed.frontmatter?.type)
+            ? null
+            : parsed.frontmatter?.type
+          if (type !== "entity" && type !== "concept") continue
+          const slug = getFileName(p.path).replace(/\.md$/, "")
+          if (!indexLinks.has(slug.toLowerCase())) {
+            results.push({
+              type: "schema",
+              severity: "warning",
+              page: "index.md",
+              detail: `Missing ${type} page in index: [[${slug}]]`,
+            })
+          }
+        }
+      } catch {
+        results.push({
+          type: "schema",
+          severity: "warning",
+          page: "index.md",
+          detail: "Missing wiki/index.md",
         })
       }
     }

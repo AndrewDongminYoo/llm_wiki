@@ -85,6 +85,43 @@ describe("buildGenerationPrompt language directive", () => {
     expect(prompt).not.toContain("Entity pages in wiki/entities/ for key entities")
   })
 
+  it("promotes schema-specific required fields to validation rules", () => {
+    const prompt = buildGenerationPrompt(
+      [
+        "## Frontmatter",
+        "",
+        "All pages must include YAML frontmatter:",
+        "```yaml",
+        "---",
+        "type: entity | concept | source | business",
+        "title: Human-readable title",
+        "tags: []",
+        "related: []",
+        "created: YYYY-MM-DD",
+        "updated: YYYY-MM-DD",
+        "---",
+        "```",
+        "",
+        "Business pages also include:",
+        "```yaml",
+        "key: <original-kb-key>",
+        "aliases: []",
+        "status: active | paused | inactive",
+        "```",
+      ].join("\n"),
+      "",
+      "",
+      "source.pdf",
+    )
+
+    expect(prompt).toContain("Schema compliance is mandatory")
+    expect(prompt).toContain("type and path MUST agree")
+    expect(prompt).toContain("Business pages also include")
+    expect(prompt).toContain("key: <original-kb-key>")
+    expect(prompt).toContain("aliases: []")
+    expect(prompt).toContain("status: active | paused | inactive")
+  })
+
   it("respects user setting regardless of source content language", () => {
     useWikiStore.getState().setOutputLanguage("English")
     const prompt = buildGenerationPrompt("", "", "", "x.pdf", undefined, "私は日本語の文章を書きます")

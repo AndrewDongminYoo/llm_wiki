@@ -7,6 +7,7 @@ import { useWikiStore, type LlmConfig, type SearchApiConfig } from "@/stores/wik
 import { useResearchStore } from "@/stores/research-store"
 import { normalizePath } from "@/lib/path-utils"
 import { buildLanguageDirective } from "@/lib/output-language"
+import { buildWikiFrontmatter } from "@/lib/wiki-frontmatter"
 
 const MAX_RESEARCH_SOURCES = 20
 
@@ -257,14 +258,14 @@ async function executeResearch(
       .trimStart()
 
     const pageContent = [
-      "---",
-      `type: query`,
-      `title: "Research: ${topic.replace(/"/g, '\\"')}"`,
-      `created: ${date}`,
-      `origin: deep-research`,
-      `tags: [research]`,
-      "---",
-      "",
+      buildWikiFrontmatter({
+        type: "query",
+        title: `Research: ${topic}`,
+        date,
+        tags: ["research"],
+        related: [],
+        extra: { origin: "deep-research" },
+      }),
       `# Research: ${topic}`,
       "",
       cleanedSynthesis,

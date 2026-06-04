@@ -201,6 +201,11 @@ function resolveCaptionConfig(
 import { buildLanguageDirective } from "@/lib/output-language"
 import { detectLanguage } from "@/lib/detect-language"
 import { sameScriptFamily } from "@/lib/language-metadata"
+import {
+  loadProjectWikiSchema,
+  repairWikiPageToSchema,
+  type WikiSchemaSpec,
+} from "@/lib/wiki-schema"
 
 // Legacy export kept for backward compatibility with existing diagnostic
 // tests. The live pipeline goes through parseFileBlocks() below, which
@@ -1171,6 +1176,40 @@ async function matchingRawSourceIdentitiesForBasename(
   return matches
 }
 
+function shouldValidateProjectSchema(relativePath: string): boolean {
+  return (
+    !isLogPath(relativePath) &&
+    relativePath !== "wiki/index.md" &&
+    !relativePath.endsWith("/index.md")
+  )
+}
+
+function repairGeneratedFileForProjectSchema(
+  relativePath: string,
+  content: string,
+  projectSchema: WikiSchemaSpec,
+): { content: string; dropReason?: string; warning?: string } {
+  const repaired = repairWikiPageToSchema(relativePath, content, projectSchema)
+  const blockingIssues = [
+    ...repaired.fatalIssues,
+    ...repaired.unrepairedIssues,
+  ]
+  if (blockingIssues.length > 0) {
+    return {
+      content,
+      dropReason: blockingIssues.map((issue) => issue.message).join(" "),
+    }
+  }
+
+  return {
+    content: repaired.content,
+    warning:
+      repaired.repairedIssues.length > 0 && repaired.content !== content
+        ? `Repaired "${relativePath}" frontmatter: ${repaired.repairedIssues.map((issue) => issue.message).join(" ")}`
+        : undefined,
+  }
+}
+
 async function writeFileBlocks(
   projectPath: string,
   text: string,
@@ -1191,6 +1230,7 @@ async function writeFileBlocks(
   // be written, so the next re-ingest goes through the full pipeline
   // instead of replaying the partial result forever.
   const hardFailures: string[] = []
+  const projectSchema = await loadProjectWikiSchema(projectPath)
 
   const targetLang = useWikiStore.getState().outputLanguage
 
@@ -1211,6 +1251,22 @@ async function writeFileBlocks(
     let content = sanitizeIngestedFileContent(rawContent)
     if (!isLogPath(relativePath) && !isListingPath(relativePath)) {
       content = canonicalizeSourcesField(content, sourceFileName)
+    }
+
+    if (projectSchema && shouldValidateProjectSchema(relativePath)) {
+      const schemaResult = repairGeneratedFileForProjectSchema(
+        relativePath,
+        content,
+        projectSchema,
+      )
+      if (schemaResult.dropReason) {
+        const msg = `Dropped "${relativePath}" — ${schemaResult.dropReason}`
+        console.warn(`[ingest] ${msg}`)
+        warnings.push(msg)
+        continue
+      }
+      if (schemaResult.warning) warnings.push(schemaResult.warning)
+      content = schemaResult.content
     }
 
     // Language guard: reject individual FILE blocks whose body contradicts
@@ -1457,6 +1513,12 @@ export function buildGenerationPrompt(
           "Use this schema as the primary routing rule for page types and directories.",
           "If it defines custom folders or distinctions (for example people, technologies, organizations, methods, or cases), write pages into those schema-defined folders instead of forcing them into wiki/entities/ or wiki/concepts/.",
           "Use wiki/entities/ and wiki/concepts/ only when the schema does not provide a more specific destination.",
+          "",
+          "Schema compliance is mandatory:",
+          "- Every FILE block's path and frontmatter type and path MUST agree with the schema's Page Types table.",
+          "- If the schema says a type belongs in `wiki/business/`, a `type: business` page MUST be written there, and pages in that directory MUST use `type: business`.",
+          "- If the schema has sections like `Source pages also include:` or `Business pages also include:`, those fields are required for that page type.",
+          "- Never emit a partial second FILE block, `---FILE:`, or `---END FILE---` inside a file's content.",
         ].join("\n")
       : "",
     "",
@@ -1492,6 +1554,7 @@ export function buildGenerationPrompt(
     "  • related  — array of bare wiki page slugs: `related: [foo, bar-baz]`. Do NOT include",
     "               `wiki/`, `.md`, or `[[…]]` here — slugs only.",
     `  • sources  — array of source filenames; MUST include "${sourceFileName}".`,
+    "  • schema-specific fields — include every additional field required by the project schema for the page's type",
     "",
     "Concrete example of a complete, parseable page (everything between the two `---` lines",
     "is the frontmatter; the heading and prose below are the body):",
@@ -2347,8 +2410,8 @@ export async function startIngest(
 
   const [sourceContent, schema, purpose, index] = await Promise.all([
     tryReadSourceTextFile(sp),
-    tryReadFile(`${pp}/wiki/schema.md`),
-    tryReadFile(`${pp}/wiki/purpose.md`),
+    tryReadFile(`${pp}/schema.md`),
+    tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
@@ -2422,9 +2485,10 @@ export async function executeIngestWrites(
     ? `wiki/sources/${activeSourceSummarySlug}.md`
     : null
 
-  const [schema, index] = await Promise.all([
-    tryReadFile(`${pp}/wiki/schema.md`),
+  const [schema, index, projectSchema] = await Promise.all([
+    tryReadFile(`${pp}/schema.md`),
     tryReadFile(`${pp}/wiki/index.md`),
+    loadProjectWikiSchema(pp),
   ])
 
   const conversationHistory = store.messages
@@ -2524,6 +2588,21 @@ export async function executeIngestWrites(
       !isListingPath(relativePath)
     ) {
       content = canonicalizeSourcesField(content, activeSourceIdentity)
+    }
+
+    if (projectSchema && shouldValidateProjectSchema(relativePath)) {
+      const schemaResult = repairGeneratedFileForProjectSchema(
+        relativePath,
+        content,
+        projectSchema,
+      )
+      if (schemaResult.dropReason) {
+        console.warn(
+          `[executeIngestWrites] Dropped "${relativePath}" — ${schemaResult.dropReason}`,
+        )
+        continue
+      }
+      content = schemaResult.content
     }
 
     const fullPath = `${pp}/${relativePath}`
