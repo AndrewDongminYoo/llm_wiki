@@ -26,6 +26,148 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.5.2",
+    date: "2026-06-25",
+    highlights: {
+      en: [
+        "Fixed knowledge graph node previews so clicked pages open in the graph-side preview panel instead of switching to the Wiki page.",
+      ],
+      zh: [
+        "修复知识图谱节点预览：点击页面节点时会在图谱右侧预览栏打开，不再跳转到 Wiki 页面。",
+      ],
+    },
+  },
+  {
+    version: "0.5.1",
+    date: "2026-06-24",
+    highlights: {
+      en: [
+        "Added Chat Agent modes, persisted tool progress, and project file tools for local inspection.",
+        "Improved reasoning-model handling so chat can recover when an endpoint returns thinking text but no final answer.",
+      ],
+      zh: [
+        "新增聊天 Agent 模式、持久化工具调用进度，并加入项目文件查看工具。",
+        "改进推理模型兼容性：当端点只返回思考内容而没有最终回答时，聊天会自动兜底恢复。",
+      ],
+    },
+  },
+  {
+    version: "0.5.0",
+    date: "2026-06-24",
+    highlights: {
+      en: [
+        "Added the new chat Agent flow with query understanding, local/wiki graph tools, external search tools, and visible tool progress.",
+        "Improved chat references with an in-chat preview panel, resizable preview width, source snippets, and persisted search toggles.",
+        "Improved Agent routing by using each project overview to decide when local wiki search should be preferred over external search.",
+        "Removed the Intel macOS release build from GitHub Actions.",
+      ],
+      zh: [
+        "新增聊天 Agent 流程，支持问题理解、本地 Wiki/图谱工具、外部搜索工具，以及可见的工具调用进度。",
+        "改进聊天引用体验：支持对话内引用预览、可调预览宽度、来源片段展示，以及搜索开关持久化。",
+        "改进 Agent 路由判断：使用每个项目的 overview 来判断何时优先搜索当前知识库而不是外部网页。",
+        "移除 GitHub Actions 中的 Intel Mac 发布构建。",
+      ],
+    },
+  },
+  {
+    version: "0.4.26",
+    date: "2026-06-23",
+    highlights: {
+      en: [
+        "Merged recent community PR fixes and cleaned up release documentation.",
+        "Fixed release build issues around bundled resources and PDFium binaries.",
+        "Added Intel x86_64 macOS client support to the release build.",
+      ],
+      zh: [
+        "合并近期社区 PR 修复，并清理发布文档。",
+        "修复发布构建中随包资源和 PDFium 二进制相关问题。",
+        "新增 Intel x86_64 Mac 客户端的发布构建支持。",
+      ],
+    },
+  },
+  {
+    version: "0.4.25",
+    date: "2026-06-23",
+    highlights: {
+      en: [
+        "Added Firecrawl as a Web Search provider with friendlier handling for anonymous search limits.",
+        "Fixed a batch of reported UI, import, search, and provider compatibility bugs.",
+        "Improved release build preparation for bundled MCP resources.",
+      ],
+      zh: [
+        "新增 Firecrawl 网页搜索 Provider，并优化匿名搜索受限时的提示。",
+        "修复一批用户反馈的界面、导入、搜索和 Provider 兼容性问题。",
+        "改进发布构建中 MCP 随包资源的准备流程。",
+      ],
+    },
+  },
+  {
+    version: "0.4.24",
+    date: "2026-06-16",
+    highlights: {
+      en: [
+        "Improved project creation visibility, lint repair suggestions, zoom controls, autosave, and review persistence across project switches.",
+        "Fixed vector index cleanup, Unicode page IDs, duplicate scan prefiltering, and local embedding requests so indexes and rebuilds stay accurate.",
+        "Improved MCP and local CLI provider reliability, including MCP version reporting and running Codex CLI from the project root.",
+        "Improved language prompts so technical names, model names, tool names, and code identifiers are preserved more reliably.",
+        "Hardened Windows startup with a native title bar, earlier API startup, and a visible startup-error fallback instead of a blank window.",
+      ],
+      zh: [
+        "改进项目创建字段可见性、检查修复建议、缩放控制、自动保存，以及切换项目后的待审阅项保留。",
+        "修复向量索引清理、Unicode 页面 ID、重复扫描预筛选和本地 Embedding 请求，确保索引与重建结果更准确。",
+        "改进 MCP 与本地 CLI Provider 稳定性，包括 MCP 版本显示，以及从项目根目录运行 Codex CLI。",
+        "改进语言提示词，更可靠地保留技术名、模型名、工具名和代码标识符。",
+        "增强 Windows 启动稳定性：使用原生标题栏、提前启动 API，并在前端启动失败时显示错误信息而不是白屏。",
+      ],
+    },
+  },
+  {
+    version: "0.4.23",
+    date: "2026-06-08",
+    highlights: {
+      en: [
+        "Added Doubao embedding compatibility and improved embedding rebuild safety.",
+        "Fixed dedup scan hangs, Codex CLI PATH detection from login shells, and several ingest / scheduled import reliability issues.",
+      ],
+      zh: [
+        "新增 Doubao Embedding 兼容，并提升 Embedding 重建过程的安全性。",
+        "修复去重扫描卡住、Codex CLI 登录 shell PATH 检测，以及多处摄取和定时导入稳定性问题。",
+      ],
+    },
+  },
+  {
+    version: "0.4.22",
+    date: "2026-06-08",
+    highlights: {
+      en: [
+        "Improved MinerU PDF previews by extracting images from MinerU result archives and rewriting them into Markdown image links.",
+        "Converted MinerU HTML tables inside Markdown output into Markdown tables for cleaner preview and ingest.",
+        "Hardened MinerU image handling for spaces, parentheses, path traversal, duplicate names, and partial image-save failures.",
+      ],
+      zh: [
+        "改进 MinerU PDF 预览：从 MinerU 结果压缩包提取图片，并重写为 Markdown 图片引用。",
+        "将 MinerU Markdown 输出中的 HTML 表格转换为 Markdown 表格，让预览和摄取更干净。",
+        "强化 MinerU 图片处理，覆盖空格、括号、路径穿越、重名图片和图片保存部分失败等边界。",
+      ],
+    },
+  },
+  {
+    version: "0.4.21",
+    date: "2026-06-07",
+    highlights: {
+      en: [
+        "Improved chat image support with safer local image handling, MiniMax M3 provider compatibility, and GLM vision model compatibility.",
+        "Improved MinerU PDF parsing, local CLI provider resolution, API/MCP settings, and source/image ingestion reliability.",
+        "Closed a batch of fixed GitHub issues covering source monitoring, scrolling, long-document ingest, editing, and provider compatibility.",
+      ],
+      zh: [
+        "改进 AI 对话图片支持，增强本地图片处理安全性，并扩展 MiniMax M3 Provider 与 GLM 多模态模型兼容。",
+        "优化 MinerU PDF 解析、本地 CLI Provider 解析、API/MCP 设置，以及资料与图片摄取稳定性。",
+        "集中处理并关闭一批已修复的 GitHub issue，覆盖资料监控、滚动、长文档摄取、编辑保存和 Provider 兼容。",
+      ],
+    },
+  },
+  {
     version: "0.4.20",
     date: "2026-06-04",
     highlights: {

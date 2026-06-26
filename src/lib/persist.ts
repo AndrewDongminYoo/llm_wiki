@@ -2,6 +2,7 @@ import { writeFile, readFile, createDirectory } from "@/commands/fs"
 import type { ReviewItem } from "@/stores/review-store"
 import type { LintItem } from "@/stores/lint-store"
 import type { DisplayMessage, Conversation } from "@/stores/chat-store"
+import type { ChatAgentMode } from "@/lib/chat-agent"
 import { normalizePath } from "@/lib/path-utils"
 
 async function ensureDir(projectPath: string): Promise<void> {
@@ -46,6 +47,18 @@ interface PersistedChatData {
   messages: DisplayMessage[]
 }
 
+export interface ChatPreferences {
+  useWebSearch: boolean
+  useAnyTxtSearch: boolean
+  agentMode: ChatAgentMode
+}
+
+function stripPersistedMessageImages(msg: DisplayMessage): DisplayMessage {
+  if (!msg.images || msg.images.length === 0) return msg
+  const { images: _images, ...rest } = msg
+  return rest
+}
+
 export async function saveChatHistory(
   projectPath: string,
   conversations: Conversation[],
@@ -64,7 +77,10 @@ export async function saveChatHistory(
   const byConversation = new Map<string, DisplayMessage[]>()
   for (const msg of messages) {
     const list = byConversation.get(msg.conversationId) ?? []
-    list.push(msg)
+    // Images can be multi-megabyte base64 payloads. Keep them in memory for the
+    // current chat turn, but don't persist them into chat JSON where they would
+    // quickly bloat auto-save files and project backups.
+    list.push(stripPersistedMessageImages(msg))
     byConversation.set(msg.conversationId, list)
   }
 
@@ -125,5 +141,41 @@ export async function loadChatHistory(projectPath: string): Promise<PersistedCha
     } catch {
       return { conversations: [], messages: [] }
     }
+  }
+}
+
+export async function saveChatPreferences(
+  projectPath: string,
+  preferences: ChatPreferences,
+): Promise<void> {
+  const pp = normalizePath(projectPath)
+  await ensureDir(pp)
+  await writeFile(`${pp}/.llm-wiki/chat-preferences.json`, JSON.stringify(preferences, null, 2))
+}
+
+export async function loadChatPreferences(projectPath: string): Promise<ChatPreferences> {
+  const pp = normalizePath(projectPath)
+  try {
+    const content = await readFile(`${pp}/.llm-wiki/chat-preferences.json`)
+    const parsed = JSON.parse(content) as Partial<ChatPreferences>
+    return {
+      useWebSearch: parsed.useWebSearch === true,
+      useAnyTxtSearch: parsed.useAnyTxtSearch === true,
+      agentMode: normalizePersistedAgentMode(parsed.agentMode),
+    }
+  } catch {
+    return { useWebSearch: false, useAnyTxtSearch: false, agentMode: "standard" }
+  }
+}
+
+function normalizePersistedAgentMode(value: unknown): ChatAgentMode {
+  switch (value) {
+    case "fast":
+    case "standard":
+    case "deep":
+    case "local_first":
+      return value
+    default:
+      return "standard"
   }
 }

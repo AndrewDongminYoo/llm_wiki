@@ -30,6 +30,16 @@ describe("resolveConfig", () => {
     ])
   })
 
+  it("exposes Atlas Cloud as an OpenAI-compatible chat-completions preset", () => {
+    const atlas = LLM_PRESETS.find((preset) => preset.id === "atlascloud")
+
+    expect(atlas?.provider).toBe("custom")
+    expect(atlas?.baseUrl).toBe("https://api.atlascloud.ai/v1")
+    expect(atlas?.apiMode).toBe("chat_completions")
+    expect(atlas?.defaultModel).toBe("deepseek-ai/deepseek-v4-pro")
+    expect(atlas?.suggestedModels).toContain("deepseek-ai/deepseek-v4-pro")
+  })
+
   it("keeps Xiaomi MiMo presets aligned with current official and Token Plan endpoints", () => {
     const mimo = LLM_PRESETS.find((preset) => preset.id === "xiaomi-mimo")
 
@@ -101,5 +111,65 @@ describe("resolveConfig", () => {
 
     expect(resolved.azureApiVersion).toBe("2025-01-01-preview")
     expect(resolved.azureModelFamily).toBe("gpt5")
+  })
+
+  it("carries local CLI isolation for Claude Code and Codex CLI presets", () => {
+    const preset: LlmPreset = {
+      id: "codex-cli",
+      label: "Codex CLI",
+      provider: "codex-cli",
+      defaultModel: "gpt-5",
+    }
+
+    const resolved = resolveConfig(
+      preset,
+      { localCliIsolation: true },
+      fallbackConfig(),
+    )
+
+    expect(resolved.localCliIsolation).toBe(true)
+  })
+
+  it("carries Codex CLI timeout only for the Codex CLI preset", () => {
+    const codexPreset: LlmPreset = {
+      id: "codex-cli",
+      label: "Codex CLI",
+      provider: "codex-cli",
+      defaultModel: "gpt-5",
+    }
+    const claudePreset: LlmPreset = {
+      id: "claude-code-cli",
+      label: "Claude Code CLI",
+      provider: "claude-code",
+      defaultModel: "sonnet",
+    }
+
+    expect(resolveConfig(
+      codexPreset,
+      { codexCliTimeoutMinutes: 9999 },
+      fallbackConfig(),
+    ).codexCliTimeoutMinutes).toBe(240)
+    expect(resolveConfig(
+      claudePreset,
+      { codexCliTimeoutMinutes: 45 },
+      fallbackConfig(),
+    ).codexCliTimeoutMinutes).toBeUndefined()
+  })
+
+  it("does not apply local CLI isolation to hosted providers", () => {
+    const preset: LlmPreset = {
+      id: "openai",
+      label: "OpenAI",
+      provider: "openai",
+      defaultModel: "gpt-5",
+    }
+
+    const resolved = resolveConfig(
+      preset,
+      { localCliIsolation: true },
+      fallbackConfig({ localCliIsolation: true }),
+    )
+
+    expect(resolved.localCliIsolation).toBe(false)
   })
 })

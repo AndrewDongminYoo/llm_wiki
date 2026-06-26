@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react"
+import { useTranslation } from "react-i18next"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
@@ -7,7 +8,7 @@ import "katex/dist/katex.min.css"
 import {
   Bot, User, FileText, BookmarkPlus, ChevronDown, ChevronRight, RefreshCw, Copy, Check,
   Users, Lightbulb, BookOpen, HelpCircle, GitMerge, BarChart3, Layout, Globe,
-  TrendingUp, Target, Image as ImageIcon, FileSearch,
+  TrendingUp, Target, Sparkles, Image as ImageIcon, FileSearch,
 } from "lucide-react"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -20,12 +21,16 @@ import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
 import { normalizePath, getFileName } from "@/lib/path-utils"
 import { makeQueryFileName } from "@/lib/wiki-filename"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
+import { messageImageToDataUrl } from "@/lib/chat-image-utils"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
+import { transformImageEmbeds } from "@/lib/wikilink-transform"
 import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
 import { detectLanguage } from "@/lib/detect-language"
 import { getHtmlLang, getTextDirection } from "@/lib/language-metadata"
 import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"
 import { inferWikiTypeFromPath } from "@/lib/wiki-page-types"
+import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat-save-to-wiki"
+import type { ChatAgentEvent, ChatAgentEventStage, ChatAgentStep } from "@/lib/chat-agent"
 
 // Module-level cache of source file names
 let cachedSourceFiles: string[] = []
@@ -64,9 +69,19 @@ interface ChatMessageProps {
   message: DisplayMessage
   isLastAssistant?: boolean
   onRegenerate?: () => void
+  onOpenReferencePreview?: (preview: ChatReferencePreview) => void
 }
 
-function ChatMessageImpl({ message, isLastAssistant, onRegenerate }: ChatMessageProps) {
+export interface ChatReferencePreview {
+  title: string
+  path: string
+  content: string
+  source?: string
+  external?: boolean
+  snippet?: string
+}
+
+function ChatMessageImpl({ message, isLastAssistant, onRegenerate, onOpenReferencePreview }: ChatMessageProps) {
   const isUser = message.role === "user"
   const isSystem = message.role === "system"
   const isAssistant = message.role === "assistant"
@@ -90,20 +105,44 @@ function ChatMessageImpl({ message, isLastAssistant, onRegenerate }: ChatMessage
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
       <div className="max-w-[80%] flex flex-col gap-1.5">
-        <div
-          className={`rounded-lg px-3 py-2 text-sm ${
-            isUser
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-foreground"
-          }`}
-        >
-          {isUser ? (
-            <p dir="auto" className="whitespace-pre-wrap break-words">{message.content}</p>
-          ) : (
-            <MarkdownContent content={message.content} />
-          )}
-        </div>
-        {isAssistant && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
+        {isUser && message.images && message.images.length > 0 && (
+          <div className={`flex flex-wrap gap-1.5 ${isUser ? "justify-end" : ""}`}>
+            {message.images.map((img, i) => (
+              <img
+                key={i}
+                src={messageImageToDataUrl(img)}
+                alt=""
+                className="max-h-40 max-w-[180px] rounded-lg border border-border/40 object-contain"
+                loading="lazy"
+              />
+            ))}
+          </div>
+        )}
+        {isAssistant && (
+          <SavedAgentActivity steps={message.agentSteps ?? []} />
+        )}
+        {(!isUser || message.content) && (
+          <div
+            className={`rounded-lg px-3 py-2 text-sm ${
+              isUser
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-foreground"
+            }`}
+          >
+            {isUser ? (
+              <p dir="auto" className="whitespace-pre-wrap break-words">{message.content}</p>
+            ) : (
+              <MarkdownContent content={message.content} />
+            )}
+          </div>
+        )}
+        {isAssistant && (
+          <CitedReferencesPanel
+            content={message.content}
+            savedReferences={message.references}
+            onOpenReferencePreview={onOpenReferencePreview}
+          />
+        )}
         {isAssistant && hovered && (
           <div className="flex items-center gap-1">
             <CopyButton content={message.content} />
@@ -125,10 +164,36 @@ function ChatMessageImpl({ message, isLastAssistant, onRegenerate }: ChatMessage
   )
 }
 
+function SavedAgentActivity({ steps }: { steps: ChatAgentStep[] }) {
+  const events = useMemo<ChatAgentEvent[]>(() => steps
+    .filter((step) => step.type !== "final")
+    .map((step) => ({
+      stage: step.type === "understanding"
+        ? "understanding"
+        : step.type === "routing"
+          ? "routing"
+          : step.type === "tool_call"
+            ? "tool_call"
+            : "tool_result",
+      tool: step.tool,
+      query: step.query,
+      message: step.message,
+      count: step.count,
+      status: step.status,
+    })), [steps])
+  if (events.length === 0) return null
+  return (
+    <div className="rounded-md border border-border/50 bg-background/50 px-2 py-1">
+      <AgentActivity events={events} compact />
+    </div>
+  )
+}
+
 export const ChatMessage = memo(ChatMessageImpl, (prev, next) =>
   prev.message === next.message
   && prev.isLastAssistant === next.isLastAssistant
   && prev.onRegenerate === next.onRegenerate
+  && prev.onOpenReferencePreview === next.onOpenReferencePreview
 )
 
 function CopyButton({ content }: { content: string }) {
@@ -175,17 +240,10 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
       // See `src/lib/wiki-filename.ts` — the slug is Unicode-aware
       // (so CJK titles don't collapse to empty) and the HHMMSS
       // timestamp suffix guarantees same-day saves stay distinct.
-      const firstLine = content.split("\n")[0].replace(/^#+\s*/, "").trim()
-      const title = firstLine.slice(0, 60) || "Saved Query"
+      const cleanContent = cleanAssistantContentForWikiSave(content)
+      const title = titleFromCleanAssistantContent(cleanContent)
       const { date, fileName } = makeQueryFileName(title)
       const filePath = `${pp}/wiki/queries/${fileName}`
-
-      // Strip hidden sources comment and thinking blocks from content
-      const cleanContent = content
-        .replace(/<!--\s*sources:.*?-->/g, "")
-        .replace(/<think(?:ing)?>\s*[\s\S]*?<\/think(?:ing)?>\s*/gi, "")
-        .replace(/<think(?:ing)?>\s*[\s\S]*$/gi, "")
-        .trimEnd()
 
       const frontmatter = [
         "---",
@@ -315,6 +373,33 @@ function displayExternalPath(page: CitedPage): string {
   return raw
 }
 
+function isAnyTxtReference(page: CitedPage): boolean {
+  return page.kind === "external" && page.source?.toLowerCase() === "anytxt"
+}
+
+function referenceSourceLabel(page: CitedPage): string {
+  if (isAnyTxtReference(page)) return "AnyTXT"
+  if (page.kind === "external") return page.source || "Web"
+  return "Wiki"
+}
+
+function referenceLocator(page: CitedPage): string {
+  if (page.kind === "external") return displayExternalPath(page)
+  return page.path
+}
+
+function referenceSnippet(page: CitedPage): string {
+  return page.kind === "external" ? page.snippet?.trim() ?? "" : ""
+}
+
+function projectAbsolutePath(projectPath: string, path: string): string {
+  const pp = normalizePath(projectPath)
+  const normalized = normalizePath(path)
+  if (normalized.startsWith(`${pp}/`)) return normalized
+  if (normalized.startsWith("/")) return normalized
+  return `${pp}/${normalized.replace(/^\/+/, "")}`
+}
+
 /**
  * Markdown image-reference regex used to count `![](url)` occurrences
  * in cited pages AND extract the first URL (so the image-badge
@@ -335,11 +420,17 @@ interface CitedImageInfo {
   firstUrl: string | null
 }
 
-function CitedReferencesPanel({ content, savedReferences }: { content: string; savedReferences?: CitedPage[] }) {
+function CitedReferencesPanel({
+  content,
+  savedReferences,
+  onOpenReferencePreview,
+}: {
+  content: string
+  savedReferences?: CitedPage[]
+  onOpenReferencePreview?: (preview: ChatReferencePreview) => void
+}) {
   const project = useWikiStore((s) => s.project)
-  const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
-  const setFileContent = useWikiStore((s) => s.setFileContent)
-  const setExternalPreview = useWikiStore((s) => s.setExternalPreview)
+  const openFileInPreview = useWikiStore((s) => s.openFileInPreview)
   const setPendingScrollImageSrc = useWikiStore((s) => s.setPendingScrollImageSrc)
   const [expanded, setExpanded] = useState(false)
   /**
@@ -432,8 +523,15 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
         try {
           const content = await readFile(rawPath)
           setPendingScrollImageSrc(imageUrlToAbsolute(firstUrl, pp))
-          setSelectedFile(rawPath)
-          setFileContent(content)
+          if (onOpenReferencePreview) {
+            onOpenReferencePreview({
+              title: getFileName(rawPath),
+              path: rawPath,
+              content,
+            })
+          } else {
+            openFileInPreview(rawPath, content)
+          }
           console.log(`[refs:image-jump] ${firstUrl} → raw source ${rawPath}`)
           return
         } catch (err) {
@@ -444,15 +542,23 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
       // target — at least the safety-net section will scroll into
       // view there.
       try {
-        const content = await readFile(`${pp}/${fallbackPath}`)
+        const fallbackAbsPath = projectAbsolutePath(pp, fallbackPath)
+        const content = await readFile(fallbackAbsPath)
         setPendingScrollImageSrc(firstUrl)
-        setSelectedFile(`${pp}/${fallbackPath}`)
-        setFileContent(content)
+        if (onOpenReferencePreview) {
+          onOpenReferencePreview({
+            title: getFileName(fallbackAbsPath),
+            path: fallbackAbsPath,
+            content,
+          })
+        } else {
+          openFileInPreview(fallbackAbsPath, content)
+        }
       } catch (err) {
         console.warn(`[refs:image-jump] fallback also failed:`, err)
       }
     },
-    [project, setPendingScrollImageSrc, setSelectedFile, setFileContent],
+    [project, setPendingScrollImageSrc, openFileInPreview, onOpenReferencePreview],
   )
 
   if (citedPages.length === 0) return null
@@ -486,25 +592,35 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
           const openCitedPage = async () => {
             if (page.kind === "external") {
               const target = page.url || page.path
-              if (page.source?.toLowerCase() === "anytxt") {
-                const displayPath = displayExternalPath(page)
-                const previewPath = `anytxt-preview://${encodeURIComponent(target || page.title)}`
-                const previewContent = [
-                  `# ${page.title}`,
-                  "",
-                  `**Source:** ${page.source ?? "AnyTXT"}`,
-                  `**Path:** ${displayPath}`,
-                  "",
-                  "## Preview",
-                  "",
-                  page.snippet?.trim() || "(No fragment returned by AnyTXT.)",
-                ].join("\n")
-                setSelectedFile(previewPath)
-                setFileContent(previewContent)
-                setExternalPreview({
+              const displayPath = displayExternalPath(page)
+              const previewPath = `${isAnyTxtReference(page) ? "anytxt" : "external"}-preview://${encodeURIComponent(target || page.title)}`
+              const previewContent = [
+                `# ${page.title}`,
+                "",
+                `**Source:** ${referenceSourceLabel(page)}`,
+                `**Path:** ${displayPath}`,
+                "",
+                "## Preview",
+                "",
+                page.snippet?.trim() || "(No preview fragment returned.)",
+              ].join("\n")
+              if (onOpenReferencePreview) {
+                onOpenReferencePreview({
+                  title: page.title,
+                  path: displayPath,
+                  source: referenceSourceLabel(page),
+                  external: true,
+                  content: previewContent,
+                  snippet: page.snippet ?? "",
+                })
+                return
+              }
+              if (isAnyTxtReference(page)) {
+                openFileInPreview(previewPath, previewContent)
+                useWikiStore.getState().setExternalPreview({
                   title: page.title,
                   path: previewPath,
-                  source: page.source ?? "AnyTXT",
+                  source: referenceSourceLabel(page),
                   url: displayPath,
                   snippet: page.snippet ?? "",
                 })
@@ -521,7 +637,7 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
             const pp = normalizePath(project.path)
             const id = getFileName(page.path.replace(/^wiki\//, "").replace(/\.md$/, ""))
             const candidates = [
-              `${pp}/${page.path}`,
+              projectAbsolutePath(pp, page.path),
               `${pp}/wiki/entities/${id}.md`,
               `${pp}/wiki/concepts/${id}.md`,
               `${pp}/wiki/sources/${id}.md`,
@@ -532,14 +648,32 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
             ]
             for (const candidate of candidates) {
               try {
-                await readFile(candidate)
-                setSelectedFile(candidate)
+                const content = await readFile(candidate)
+                if (onOpenReferencePreview) {
+                  onOpenReferencePreview({
+                    title: page.title,
+                    path: candidate,
+                    content,
+                  })
+                } else {
+                  openFileInPreview(candidate, content)
+                }
                 return
               } catch {
                 // try next
               }
             }
-            setSelectedFile(`${pp}/${page.path}`)
+            const fallbackPath = projectAbsolutePath(pp, page.path)
+            const fallbackContent = `Unable to load: ${page.path}`
+            if (onOpenReferencePreview) {
+              onOpenReferencePreview({
+                title: page.title,
+                path: fallbackPath,
+                content: fallbackContent,
+              })
+            } else {
+              openFileInPreview(fallbackPath, fallbackContent)
+            }
           }
           return (
             // Outer is a div, NOT a button — we have two click
@@ -550,7 +684,7 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
             <div
               key={page.path}
               className="flex w-full items-center gap-1.5 rounded text-left"
-              title={page.kind === "external" ? `${page.source ?? "External"}: ${page.url ?? page.path}` : page.path}
+              title={page.kind === "external" ? `${referenceSourceLabel(page)}: ${referenceLocator(page)}` : page.path}
             >
               <span className="text-[10px] text-muted-foreground/60 w-4 shrink-0 text-right">[{i + 1}]</span>
               {/*
@@ -583,17 +717,22 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
                 className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent/50 transition-colors"
               >
                 <Icon className={`h-3 w-3 shrink-0 ${config.color}`} />
-                <span className="min-w-0 flex-1 truncate text-foreground/80">
-                  {page.title}
-                  {page.kind === "external" && page.source?.toLowerCase() === "anytxt" && (
+                <span className="min-w-0 flex-1 text-foreground/80">
+                  <span className="block truncate">{page.title}</span>
+                  {page.kind === "external" && (
                     <span className="mt-0.5 block truncate text-[10px] text-muted-foreground/75">
-                      {displayExternalPath(page)}
+                      {referenceLocator(page)}
+                    </span>
+                  )}
+                  {isAnyTxtReference(page) && referenceSnippet(page) && (
+                    <span className="mt-0.5 line-clamp-2 whitespace-normal text-[10px] leading-4 text-muted-foreground">
+                      {referenceSnippet(page)}
                     </span>
                   )}
                 </span>
-                {page.kind === "external" && page.source && (
-                  <span className="shrink-0 rounded bg-background/80 px-1 py-0 text-[10px] text-muted-foreground">
-                    {page.source}
+                {page.kind === "external" && (
+                  <span className="shrink-0 rounded border border-border/60 bg-background/80 px-1 py-0 text-[10px] text-muted-foreground">
+                    {referenceSourceLabel(page)}
                   </span>
                 )}
               </button>
@@ -689,9 +828,10 @@ function extractCitedPages(text: string): CitedPage[] {
 
 interface StreamingMessageProps {
   content: string
+  agentEvents?: ChatAgentEvent[]
 }
 
-export function StreamingMessage({ content }: StreamingMessageProps) {
+export function StreamingMessage({ content, agentEvents = [] }: StreamingMessageProps) {
   const { thinking, answer } = useMemo(() => separateThinking(content), [content])
   const isThinking = thinking !== null && answer.length === 0
 
@@ -701,6 +841,7 @@ export function StreamingMessage({ content }: StreamingMessageProps) {
         <Bot className="h-4 w-4" />
       </div>
       <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-muted text-foreground">
+        <AgentActivity events={agentEvents} />
         {isThinking ? (
           <StreamingThinkingBlock content={thinking} />
         ) : (
@@ -713,6 +854,79 @@ export function StreamingMessage({ content }: StreamingMessageProps) {
       </div>
     </div>
   )
+}
+
+function AgentActivity({ events, compact = false }: { events: ChatAgentEvent[]; compact?: boolean }) {
+  const { t } = useTranslation()
+  const visible = events.filter((event, index, arr) => {
+    const prev = arr[index - 1]
+    return !prev
+      || prev.stage !== event.stage
+      || prev.query !== event.query
+      || prev.tool !== event.tool
+      || prev.message !== event.message
+  })
+  if (visible.length === 0) return null
+
+  return (
+    <div className={`${compact ? "" : "mb-2 border-b border-border/40 pb-2"} flex flex-col gap-1.5`}>
+      {visible.map((event, index) => {
+        const active = index === visible.length - 1
+        const Icon = agentStageIcon(event.stage)
+        return (
+          <div
+            key={`${event.stage}-${event.query ?? ""}-${index}`}
+            className={`flex min-w-0 items-center gap-2 text-xs ${
+              active ? "text-foreground" : "text-muted-foreground"
+            }`}
+          >
+            <span
+              className={`flex h-4 w-4 shrink-0 items-center justify-center ${
+                active
+                  ? "text-primary/70"
+                  : "text-muted-foreground/60"
+              }`}
+            >
+              <Icon className={`h-3.5 w-3.5 ${active ? "animate-pulse" : ""}`} />
+            </span>
+            <span className="truncate">
+              {event.message || t(`chat.agent.${event.stage}`)}
+              {event.query ? <span className="text-muted-foreground"> · {event.query}</span> : null}
+              {typeof event.count === "number" ? (
+                <span className="text-muted-foreground"> · {t("chat.agent.resultCount", { count: event.count })}</span>
+              ) : null}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function agentStageIcon(stage: ChatAgentEventStage) {
+  switch (stage) {
+    case "understanding":
+      return Target
+    case "tool_call":
+      return Sparkles
+    case "tool_result":
+      return Check
+    case "searching_wiki":
+      return BookOpen
+    case "searching_graph":
+      return GitMerge
+    case "searching_web":
+      return Globe
+    case "searching_anytxt":
+      return FileSearch
+    case "reading_context":
+      return Layout
+    case "writing":
+      return Bot
+    case "routing":
+    default:
+      return Sparkles
+  }
 }
 
 function MarkdownContent({ content }: { content: string }) {
@@ -899,6 +1113,12 @@ function ThinkingBlock({ content }: { content: string }) {
 function processContent(text: string): string {
   let result = text
 
+  // Rewrite Obsidian image embeds (`![[…]]`) into standard markdown
+  // FIRST — before the `[[…]]` → wikilink conversion below, which
+  // would otherwise mangle the embed target into a broken
+  // `wikilink:` image. Same rule the wiki reader / raw preview use.
+  result = transformImageEmbeds(result)
+
   // Wrap bare \begin{...}...\end{...} blocks with $$ for remark-math
   result = result.replace(
     /(?<!\$\$\s*)(\\begin\{[^}]+\}[\s\S]*?\\end\{[^}]+\})(?!\s*\$\$)/g,
@@ -932,9 +1152,7 @@ function processContent(text: string): string {
 
 function WikiLink({ pageName, children }: { pageName: string; children: React.ReactNode }) {
   const project = useWikiStore((s) => s.project)
-  const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
-  const setFileContent = useWikiStore((s) => s.setFileContent)
-  const setActiveView = useWikiStore((s) => s.setActiveView)
+  const openFileInPreview = useWikiStore((s) => s.openFileInPreview)
   const [exists, setExists] = useState<boolean | null>(null)
   const resolvedPath = useRef<string | null>(null)
 
@@ -975,13 +1193,11 @@ function WikiLink({ pageName, children }: { pageName: string; children: React.Re
     if (!resolvedPath.current) return
     try {
       const content = await readFile(resolvedPath.current)
-      setSelectedFile(resolvedPath.current)
-      setFileContent(content)
-      setActiveView("wiki")
+      openFileInPreview(resolvedPath.current, content)
     } catch {
       // ignore
     }
-  }, [setSelectedFile, setFileContent, setActiveView])
+  }, [openFileInPreview])
 
   if (exists === false) {
     return (

@@ -185,6 +185,35 @@ export const LLM_PRESETS: LlmPreset[] = [
     suggestedContextSize: 64000,
   },
   {
+    id: "atlascloud",
+    label: "Atlas Cloud",
+    hint: "api.atlascloud.ai",
+    provider: "custom",
+    baseUrl: "https://api.atlascloud.ai/v1",
+    defaultModel: "deepseek-ai/deepseek-v4-pro",
+    apiMode: "chat_completions",
+    // Atlas Cloud is a full-modal inference platform exposing many model
+    // families (DeepSeek, Qwen, GLM, Kimi, MiniMax, Claude, GPT, Gemini…)
+    // behind a single OpenAI-compatible /v1/chat/completions endpoint, so
+    // it reuses the generic chat-completions wire like the other hosted
+    // gateways above. `deepseek-v4-pro` is a reasoning model — leave the
+    // context window generous. Full catalog is large and rotates; this is
+    // a practical subset and users can type any other id into the input.
+    suggestedModels: [
+      "deepseek-ai/deepseek-v4-pro",
+      "deepseek-ai/deepseek-v4-flash",
+      "deepseek-ai/deepseek-v3.2",
+      "Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "moonshotai/kimi-k2.6",
+      "zai-org/glm-5",
+      "minimaxai/minimax-m2.7",
+      "anthropic/claude-sonnet-4.6",
+      "openai/gpt-5.5",
+      "google/gemini-3.5-flash",
+    ],
+    suggestedContextSize: 128000,
+  },
+  {
     id: "groq",
     label: "Groq",
     hint: "api.groq.com",
@@ -323,21 +352,31 @@ export const LLM_PRESETS: LlmPreset[] = [
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     defaultModel: "glm-4.6",
     apiMode: "chat_completions",
-    // Current-gen Zhipu BigModel lineup. glm-5 / glm-5.1 are routed
-    // through the Z.AI international endpoint (api.z.ai) so they're
-    // not on this preset's suggestion list — users targeting those
-    // should type the id or point the base URL at api.z.ai.
+    // Current Zhipu BigModel lineup on /api/paas/v4/chat/completions.
+    // Vision-capable models use the same OpenAI-compatible image_url
+    // content blocks as our generic chat-completions wire.
     suggestedModels: [
+      "glm-5.1",
+      "glm-5-turbo",
+      "glm-5",
+      "glm-5v-turbo",
+      "glm-4.7",
+      "glm-4.7-flash",
+      "glm-4.7-flashx",
       "glm-4.6",
+      "glm-4.6v",
       "glm-4.5",
+      "glm-4.5v",
       "glm-4.5-air",
       "glm-4.5-airx",
       "glm-4.5-flash",
+      "glm-4-flash-250414",
+      "glm-4-flashx-250414",
       "glm-4-plus",
       "glm-4-air",
       "glm-4-flash",
-      "glm-zero-preview",
       "glm-4v-plus",
+      "glm-zero-preview",
     ],
     suggestedContextSize: 128000,
   },
