@@ -1,3 +1,5 @@
+import yaml from "js-yaml"
+
 /**
  * Clean up an LLM-generated wiki page body before it hits disk.
  *
@@ -82,6 +84,11 @@ export function sanitizeIngestedFileContent(content: string): string {
   // left alone — those render fine via the wikilink → markdown
   // link transform applied at read time.
   cleaned = repairWikilinkListsInFrontmatter(cleaned)
+
+  // (4) Normalise YAML block scalars (>-, |-, etc.) to plain inline
+  // values. Runs after the wikilink repair so that step's quoted
+  // values are already in place when we re-serialise.
+  cleaned = normalizeBlockScalarsInFrontmatter(cleaned)
 
   return cleaned
 }
@@ -168,5 +175,75 @@ function repairWikilinkListsInFrontmatter(content: string): string {
     content.slice(0, m.index! + 4) + // up to and including "---\n"
     repairedPayload +
     content.slice(m.index! + 4 + m[1].length)
+  )
+}
+
+/**
+ * Normalise YAML block scalars in frontmatter to plain inline values.
+ *
+ * LLMs sometimes emit folded (`>-`) or literal (`|-`) block scalars
+ * for string fields, e.g.:
+ *
+ *     description: >-
+ *       A long description that the model
+ *       decided to fold across lines.
+ *
+ * This is valid YAML but is not supported by LLM Wiki's frontmatter
+ * renderer and causes display/parse issues in downstream tooling.
+ * The fix: parse the frontmatter, collapse embedded newlines in
+ * string values to a single space, then re-serialise with
+ * `lineWidth: -1` so js-yaml never re-introduces block scalars.
+ *
+ * The function is a no-op when the frontmatter contains no block
+ * scalar indicators, so it adds negligible overhead to clean pages.
+ */
+function normalizeBlockScalarsInFrontmatter(content: string): string {
+  const fmRe = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/
+  const m = content.match(fmRe)
+  if (!m) return content
+
+  const payload = m[1]
+  // Fast exit: no block scalar indicator on any value line.
+  // A block scalar always appears as the sole value after `key: `, e.g.
+  // `description: >-` with nothing else on that line.
+  if (!/^\s*[\w-]+\s*:\s*[>|][-+]?\s*$/m.test(payload)) return content
+
+  let parsed: unknown
+  try {
+    parsed = yaml.load(payload, { schema: yaml.JSON_SCHEMA })
+  } catch {
+    // Malformed YAML — leave it for the existing repair steps.
+    return content
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return content
+
+  // Collapse embedded newlines in scalar values so yaml.dump never
+  // re-introduces block scalars (which only appear when values contain \n).
+  const normalized: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof v === "string") {
+      normalized[k] = v.replace(/\s*\n\s*/g, " ").trim()
+    } else if (Array.isArray(v)) {
+      normalized[k] = v.map((item) =>
+        typeof item === "string" ? item.replace(/\s*\n\s*/g, " ").trim() : item,
+      )
+    } else {
+      normalized[k] = v
+    }
+  }
+
+  // Re-serialise. lineWidth: -1 disables line folding so long strings
+  // stay on one line instead of becoming block scalars.
+  const newPayload = yaml
+    .dump(normalized, { lineWidth: -1, noRefs: true })
+    .trimEnd() // yaml.dump always appends a trailing \n
+
+  // Reconstruct: prefix up to and including "---\n", new payload,
+  // then the original "\n---..." suffix.
+  return (
+    content.slice(0, m.index! + 4) +
+    newPayload +
+    content.slice(m.index! + 4 + payload.length)
   )
 }
