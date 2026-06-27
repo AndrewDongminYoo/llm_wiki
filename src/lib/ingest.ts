@@ -1623,13 +1623,12 @@ async function writeFileBlocks(
 
     // Language guard: reject individual FILE blocks whose body contradicts
     // the user-set target language. Skip:
-    // - log.md (structural, short)
     // - /sources/ and /entities/ pages: these legitimately cite cross-
     //   language proper nouns (a German philosophy source summary naturally
     //   quotes Russian philosophers) which confuses naive script-based
     //   detection. Keep the check for /concepts/ pages, which should be
     //   authoritative content in the target language.
-    const isLog = isLogPath(relativePath)
+    // (log.md never reaches here — it's dropped above.)
     const isEntityOrSource =
       relativePath.startsWith("wiki/entities/") ||
       relativePath.includes("/entities/") ||
@@ -1638,7 +1637,6 @@ async function writeFileBlocks(
     if (
       targetLang &&
       targetLang !== "auto" &&
-      !isLog &&
       !isEntityOrSource &&
       !contentMatchesTargetLanguage(content, targetLang)
     ) {
