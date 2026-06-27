@@ -47,6 +47,7 @@ export const API_ENDPOINTS: Array<{ method: "GET" | "POST"; path: string; noteKe
   { method: "GET", path: "/api/v1/projects/{id}/files", noteKey: "endpointFilesNote" },
   { method: "GET", path: "/api/v1/projects/{id}/files/content", noteKey: "endpointContentNote" },
   { method: "GET", path: "/api/v1/projects/{id}/reviews", noteKey: "endpointReviewsNote" },
+  { method: "POST", path: "/api/v1/projects/{id}/reviews/{reviewId}/resolve", noteKey: "endpointResolveReviewNote" },
   { method: "POST", path: "/api/v1/projects/{id}/search", noteKey: "endpointSearchNote" },
   { method: "GET", path: "/api/v1/projects/{id}/graph", noteKey: "endpointGraphNote" },
   { method: "POST", path: "/api/v1/projects/{id}/sources/rescan", noteKey: "endpointRescanNote" },
