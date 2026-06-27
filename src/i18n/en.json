@@ -106,6 +106,8 @@
     "refresh": "Refresh",
     "refreshFolder": "Refresh folder",
     "refreshingFolder": "Refreshing...",
+    "expandAll": "Expand all",
+    "collapseAll": "Collapse all",
     "refreshFolderHint": "Rescan the source folder and process new, changed, or deleted files.",
     "refreshFolderTooltip": "Rescan the project source folder with the same rules as automatic monitoring. New or modified allowed files are queued for ingest; deleted sources trigger the normal wiki and index cleanup; then the file tree is rebuilt.",
     "refreshFailed": "Failed to refresh sources: {{error}}",

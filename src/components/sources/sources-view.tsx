@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
-import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown } from "lucide-react"
+import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, ChevronDown, ChevronsDownUp, ChevronsUpDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -49,6 +49,15 @@ export function SourcesView() {
    *      anchored here is the right scope.
    */
   const [pendingDeletePath, setPendingDeletePath] = useState<string | null>(null)
+  // Per-folder collapsed state, lifted here so the header buttons can
+  // collapse/expand the whole tree at once (SourceTree reads + toggles it).
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const folderPaths = useMemo(() => collectFolderPaths(sources), [sources])
+  const collapseAll = useCallback(
+    () => setCollapsed(Object.fromEntries(folderPaths.map((p) => [p, true]))),
+    [folderPaths],
+  )
+  const expandAll = useCallback(() => setCollapsed({}), [])
 
   // Auto-disarm: 5 seconds without a second click resets the
   // pending state. Prevents a stale armed button from firing if
@@ -281,6 +290,44 @@ export function SourcesView() {
               {t("sources.refreshFolderTooltip")}
             </TooltipContent>
           </Tooltip>
+          {folderPaths.length > 0 && (
+            <>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={expandAll}
+                      aria-label={t("sources.expandAll", "Expand all")}
+                    />
+                  }
+                >
+                  <ChevronsUpDown className="h-4 w-4" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom" align="end">
+                  {t("sources.expandAll", "Expand all")}
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={collapseAll}
+                      aria-label={t("sources.collapseAll", "Collapse all")}
+                    />
+                  }
+                >
+                  <ChevronsDownUp className="h-4 w-4" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom" align="end">
+                  {t("sources.collapseAll", "Collapse all")}
+                </TooltipContent>
+              </Tooltip>
+            </>
+          )}
           <Button size="sm" onClick={handleImport} disabled={importing}>
             <Plus className="mr-1 h-4 w-4" />
             {importing ? t("sources.importing") : t("sources.import")}
@@ -327,6 +374,8 @@ export function SourcesView() {
               pendingDeletePath={pendingDeletePath}
               setPendingDeletePath={setPendingDeletePath}
               ingestingPath={ingestingPath}
+              collapsed={collapsed}
+              setCollapsed={setCollapsed}
             />
           </div>
         )}
@@ -381,6 +430,18 @@ function filterTree(nodes: FileNode[]): FileNode[] {
     .filter((n) => !n.is_dir || (n.children && n.children.length > 0))
 }
 
+/** All directory paths in the tree — used to collapse every folder at once. */
+function collectFolderPaths(nodes: readonly FileNode[]): string[] {
+  const out: string[] = []
+  for (const n of nodes) {
+    if (n.is_dir) {
+      out.push(n.path)
+      if (n.children) out.push(...collectFolderPaths(n.children))
+    }
+  }
+  return out
+}
+
 function countFiles(nodes: FileNode[]): number {
   let count = 0
   for (const node of nodes) {
@@ -425,6 +486,8 @@ function SourceTree({
   pendingDeletePath,
   setPendingDeletePath,
   ingestingPath,
+  collapsed,
+  setCollapsed,
 }: {
   nodes: FileNode[]
   onOpen: (node: FileNode) => void
@@ -438,9 +501,12 @@ function SourceTree({
   pendingDeletePath: string | null
   setPendingDeletePath: (path: string | null) => void
   ingestingPath: string | null
+  /** Per-folder collapsed state, lifted to SourcesView so the header's
+   *  collapse-all / expand-all buttons can drive the whole tree. */
+  collapsed: Record<string, boolean>
+  setCollapsed: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
 }) {
   const { t } = useTranslation()
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [visibleLimit, setVisibleLimit] = useState(SOURCE_TREE_INITIAL_ROWS)
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
   const rows = useMemo(() => flattenVisibleRows(nodes, collapsed), [nodes, collapsed])
