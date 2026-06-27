@@ -219,6 +219,8 @@
   "review": {
     "title": "Review",
     "clearResolved": "Clear resolved",
+    "refresh": "Refresh",
+    "refreshHint": "Reload review items from disk",
     "allClear": "All clear — nothing to review",
     "resolvedDivider": "— Resolved —"
   },

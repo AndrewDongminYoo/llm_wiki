@@ -219,6 +219,8 @@
   "review": {
     "title": "待审阅",
     "clearResolved": "清除已解决",
+    "refresh": "刷新",
+    "refreshHint": "从磁盘重新加载审阅项",
     "allClear": "一切正常，无需审阅",
     "resolvedDivider": "— 已解决 —"
   },
