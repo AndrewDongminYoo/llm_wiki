@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next"
 import { normalizePath } from "@/lib/path-utils"
 import { decideDeleteClick } from "@/lib/sources-tree-delete"
 import { rescanProjectFileSync } from "@/lib/project-file-sync"
+import { naturalCompare } from "@/lib/natural-sort"
 import {
   deleteSourceFile,
   deleteSourceFolder,
@@ -18,6 +19,8 @@ import {
   importSourceFiles,
   importSourceFolder,
 } from "@/lib/source-lifecycle"
+import { filterRawSourceTree } from "@/lib/source-filter"
+import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 
 const SOURCE_TREE_INITIAL_ROWS = 160
 const SOURCE_TREE_LOAD_BATCH = 160
@@ -28,7 +31,6 @@ export function SourcesView() {
   const selectedFile = useWikiStore((s) => s.selectedFile)
   const setSelectedFile = useWikiStore((s) => s.setSelectedFile)
   const openFileInPreview = useWikiStore((s) => s.openFileInPreview)
-  const setFileTree = useWikiStore((s) => s.setFileTree)
   const llmConfig = useWikiStore((s) => s.llmConfig)
   const sourceWatchConfig = useWikiStore((s) => s.sourceWatchConfig)
   const dataVersion = useWikiStore((s) => s.dataVersion)
@@ -74,10 +76,7 @@ export function SourcesView() {
     const pp = normalizePath(project.path)
     try {
       const tree = await listDirectory(`${pp}/raw/sources`, true)
-      // Keep user-added dotfolders (.claude, .codex) but drop ingest
-      // noise (.cache, .DS_Store) — see filterTree.
-      const filtered = filterTree(tree)
-      setSources(filtered)
+      setSources(filterRawSourceTree(tree))
       setRefreshError(null)
     } catch (err) {
       setRefreshError(String(err))
@@ -197,9 +196,10 @@ export function SourcesView() {
       // Step 8: Refresh everything (UI side — must run with parent
       // context, hence kept here rather than inside the helper).
       await loadSources()
-      const tree = await listDirectory(pp)
-      setFileTree(tree)
-      useWikiStore.getState().bumpDataVersion()
+      await refreshProjectFileTree(pp, {
+        projectId: project.id,
+        bumpDataVersion: true,
+      })
       if (
         selectedFile === node.path ||
         result.deletedWikiPaths.includes(selectedFile ?? "")
@@ -232,9 +232,10 @@ export function SourcesView() {
     try {
       const result = await deleteSourceFolder(pp, folder)
       await loadSources()
-      const tree = await listDirectory(pp)
-      setFileTree(tree)
-      useWikiStore.getState().bumpDataVersion()
+      await refreshProjectFileTree(pp, {
+        projectId: project.id,
+        bumpDataVersion: true,
+      })
       if (
         selectedFile?.startsWith(folder.path + "/") ||
         result.deletedWikiPaths.includes(selectedFile ?? "")
@@ -413,23 +414,6 @@ interface SourceTreeRow {
   depth: number
 }
 
-// Ingest-generated noise hidden from the sources tree even though the
-// listing now includes dot entries. User-added dotfolders (.claude,
-// .codex) pass through; only these internal artifacts are dropped.
-const HIDDEN_SOURCE_ENTRIES = new Set([".cache", ".DS_Store"])
-
-function filterTree(nodes: FileNode[]): FileNode[] {
-  return nodes
-    .filter((n) => !HIDDEN_SOURCE_ENTRIES.has(n.name))
-    .map((n) => {
-      if (n.is_dir && n.children) {
-        return { ...n, children: filterTree(n.children) }
-      }
-      return n
-    })
-    .filter((n) => !n.is_dir || (n.children && n.children.length > 0))
-}
-
 /** All directory paths in the tree — used to collapse every folder at once. */
 function collectFolderPaths(nodes: readonly FileNode[]): string[] {
   const out: string[] = []
@@ -458,7 +442,7 @@ function sortSourceNodes(nodes: readonly FileNode[]): FileNode[] {
   return [...nodes].sort((a, b) => {
     if (a.is_dir && !b.is_dir) return -1
     if (!a.is_dir && b.is_dir) return 1
-    return a.name.localeCompare(b.name)
+    return naturalCompare(a.name, b.name)
   })
 }
 

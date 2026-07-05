@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import { useReviewStore, reviewIdFor, type ReviewItem } from "./review-store"
+import { normalizeReviewItems, useReviewStore, reviewIdFor, type ReviewItem } from "./review-store"
 
 // Minimal builder so each test only specifies what it cares about.
 function makeInput(overrides: Partial<Omit<ReviewItem, "id" | "resolved" | "createdAt">> = {}) {
@@ -22,6 +22,15 @@ describe("reviewIdFor — content-stable id", () => {
     // "Missing page: Attention" and "缺失页面: Attention" normalize equal.
     expect(reviewIdFor({ type: "missing-page", title: "Missing page: Attention" }))
       .toBe(reviewIdFor({ type: "missing-page", title: "缺失页面: Attention" }))
+  })
+
+  it("matches the API stable-id fixtures", () => {
+    expect(reviewIdFor({ type: "missing-page", title: "Missing page: Attention" }))
+      .toBe("review-dbdcf949")
+    expect(reviewIdFor({ type: "missing-page", title: "Missing page Attention" }))
+      .toBe("review-fa5d9960")
+    expect(reviewIdFor({ type: "missing-page", title: "疑似重复 注意力" }))
+      .toBe("review-d2dacda0")
   })
 
   it("differs across types", () => {
@@ -230,6 +239,57 @@ describe("review-store setItems — migrate-on-load", () => {
     expect(items[0].resolvedAction).toBe("user-resolved")
     expect(items[0].affectedPages).toEqual(expect.arrayContaining(["a.md", "b.md"]))
     expect(items[0].createdAt).toBe(2) // earliest
+  })
+
+  it("preserves a later duplicate resolvedAction when the first resolved item lacks one", () => {
+    const normalized = normalizeReviewItems([
+      {
+        ...makeInput({ title: "Attention" }),
+        id: "review-1",
+        resolved: true,
+        createdAt: 1,
+      },
+      {
+        ...makeInput({ title: "Missing page: Attention" }),
+        id: "review-2",
+        resolved: true,
+        resolvedAction: "user-resolved",
+        createdAt: 2,
+      },
+    ])
+
+    expect(normalized).toHaveLength(1)
+    expect(normalized[0].resolved).toBe(true)
+    expect(normalized[0].resolvedAction).toBe("user-resolved")
+  })
+
+  it("merges options when duplicate legacy items collapse", () => {
+    const normalized = normalizeReviewItems([
+      {
+        ...makeInput({
+          title: "Attention",
+          options: [{ label: "Create", action: "create" }],
+        }),
+        id: "review-1",
+        resolved: false,
+        createdAt: 1,
+      },
+      {
+        ...makeInput({
+          title: "Missing page: Attention",
+          options: [{ label: "Skip", action: "skip" }],
+        }),
+        id: "review-2",
+        resolved: false,
+        createdAt: 2,
+      },
+    ])
+
+    expect(normalized).toHaveLength(1)
+    expect(normalized[0].options).toEqual([
+      { label: "Create", action: "create" },
+      { label: "Skip", action: "skip" },
+    ])
   })
 
   it("is idempotent — loading already-stable ids changes nothing", () => {

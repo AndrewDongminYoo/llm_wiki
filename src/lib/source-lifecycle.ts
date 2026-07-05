@@ -34,6 +34,8 @@ import {
 } from "@/lib/wiki-cleanup"
 import { collectAllFilesIncludingDot } from "@/lib/sources-tree-delete"
 import { isPathAllowedBySourceWatch, normalizeSourceWatchConfig } from "@/lib/source-watch-config"
+import { isSensitiveConfigSourceFile } from "@/lib/source-filter"
+import { naturalCompare } from "@/lib/natural-sort"
 import type { SourceWatchConfig } from "@/stores/wiki-store"
 
 export const INGESTABLE_SOURCE_EXTENSIONS = new Set([
@@ -139,7 +141,10 @@ export async function enqueueSourceIngest(
 ): Promise<string[]> {
   if (!hasUsableLlm(llmConfig)) return []
   const files = sourcePaths
-    .filter(isIngestableSourcePath)
+    .filter((sourcePath) =>
+      isIngestableSourcePath(sourcePath) &&
+      !isSensitiveConfigSourceFile(sourcePath)
+    )
     .map((sourcePath) => ({
       sourcePath,
       folderContext: withRootContext(
@@ -164,6 +169,9 @@ export async function importSourceFiles(
 
   for (const sourcePath of sourcePaths) {
     const originalName = getFileName(sourcePath) || "unknown"
+    if (isSensitiveConfigSourceFile(sourcePath)) {
+      continue
+    }
     let allowed = isPathAllowedBySourceWatch(sourcePath, cfg)
     if (allowed) {
       try {
@@ -206,15 +214,18 @@ export async function importSourceFolder(
   const maxBytes = cfg.maxFileSizeMb * 1024 * 1024
   const allowedFiles: string[] = []
   // include hidden: a user importing a folder into raw/sources may
-  // legitimately want its dotfolders (.claude, .codex). Non-source
-  // noise is still filtered downstream by the source-watch allowlist
-  // and max-size check below.
+  // legitimately want dotfolder notes. Config-like files under known
+  // agent/tool config folders are still filtered before copy so API
+  // keys / tool config do not enter ingest.
   const sourceFiles = flattenFiles(await listDirectory(selectedFolder, true))
 
   for (const file of sourceFiles) {
     const relativeSourcePath = getRelativePath(file.path, sourceRoot)
     const destPath = `${destDir}/${relativeSourcePath}`
     const relPath = `raw/sources/${folderName}/${relativeSourcePath}`
+    if (isSensitiveConfigSourceFile(file.path)) {
+      continue
+    }
     let allowed = isPathAllowedBySourceWatch(relPath, cfg)
     if (allowed) {
       try {
@@ -231,14 +242,18 @@ export async function importSourceFolder(
     preprocessFile(destPath).catch(() => {})
   }
 
+  const naturallyOrderedFiles = [...allowedFiles].sort((a, b) =>
+    naturalCompare(getRelativePath(a, destDir), getRelativePath(b, destDir)),
+  )
+
   if (hasUsableLlm(llmConfig)) {
-    await enqueueSourceIngest(project, allowedFiles, llmConfig, {
+    await enqueueSourceIngest(project, naturallyOrderedFiles, llmConfig, {
       sourceRoot: destDir,
       rootContext: folderName,
     })
   }
 
-  return allowedFiles
+  return naturallyOrderedFiles
 }
 
 export async function deleteSourceFile(

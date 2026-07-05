@@ -13,7 +13,8 @@ use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use walkdir::WalkDir;
 
-use crate::{clip_server, commands};
+use crate::cors::{local_cors_headers, request_origin};
+use crate::{clip_server, commands, server_bind};
 
 const PORT: u16 = 19828;
 const API_PREFIX: &str = "/api/v1";
@@ -63,8 +64,8 @@ pub fn invalidate_config_cache() {
 pub fn start_api_server(app: AppHandle) {
     thread::spawn(move || loop {
         API_STATUS.store(0, Ordering::Relaxed);
-        let server = match bind_server_with_retry() {
-            Some(server) => server,
+        let (server, addr) = match bind_server_with_retry(&app) {
+            Some(bound) => bound,
             None => {
                 API_STATUS.store(2, Ordering::Relaxed);
                 thread::sleep(Duration::from_secs(BIND_RETRY_DELAY_SECS));
@@ -73,17 +74,18 @@ pub fn start_api_server(app: AppHandle) {
         };
 
         API_STATUS.store(1, Ordering::Relaxed);
-        eprintln!("[API Server] Listening on http://127.0.0.1:{PORT}{API_PREFIX}");
+        eprintln!("[API Server] Listening on http://{addr}{API_PREFIX}");
 
         for request in server.incoming_requests() {
             let method = request.method().clone();
             let url = request.url().to_string();
+            let origin = request_origin(&request);
             if should_rate_limit(&method, &url) && !allow_request() {
-                respond_error(request, 429, "Too many requests");
+                respond_error(request, 429, "Too many requests", origin.as_deref());
                 continue;
             }
             let Some(slot) = try_acquire_request_slot() else {
-                respond_error(request, 503, "API server is busy");
+                respond_error(request, 503, "API server is busy", origin.as_deref());
                 continue;
             };
             let app = app.clone();
@@ -104,13 +106,15 @@ pub fn start_api_server(app: AppHandle) {
     });
 }
 
-fn bind_server_with_retry() -> Option<Server> {
+fn bind_server_with_retry(app: &AppHandle) -> Option<(Server, String)> {
+    let host = server_bind::configured_bind_host(app);
+    let addr = server_bind::bind_addr(&host, PORT);
     for attempt in 1..=MAX_BIND_RETRIES {
-        match Server::http(format!("127.0.0.1:{PORT}")) {
-            Ok(server) => return Some(server),
+        match Server::http(&addr) {
+            Ok(server) => return Some((server, addr)),
             Err(err) => {
                 eprintln!(
-                    "[API Server] Failed to bind 127.0.0.1:{PORT} (attempt {attempt}/{MAX_BIND_RETRIES}): {err}"
+                    "[API Server] Failed to bind {addr} (attempt {attempt}/{MAX_BIND_RETRIES}): {err}"
                 );
                 if attempt < MAX_BIND_RETRIES {
                     thread::sleep(Duration::from_secs(BIND_RETRY_DELAY_SECS));
@@ -150,8 +154,9 @@ fn try_acquire_request_slot() -> Option<RequestSlot> {
 fn process_request(app: AppHandle, mut request: tiny_http::Request) {
     let method = request.method().clone();
     let url = request.url().to_string();
+    let origin = request_origin(&request);
     if method == Method::Options {
-        respond_options(request);
+        respond_options(request, origin.as_deref());
         return;
     }
 
@@ -169,7 +174,7 @@ fn process_request(app: AppHandle, mut request: tiny_http::Request) {
     let body = match read_body(&mut request) {
         Ok(body) => body,
         Err(err) => {
-            respond_error(request, 400, &err);
+            respond_error(request, 400, &err, origin.as_deref());
             return;
         }
     };
@@ -181,7 +186,7 @@ fn process_request(app: AppHandle, mut request: tiny_http::Request) {
         eprintln!("[API Server] request panicked: {payload:?}");
         err(500, "Internal API server error")
     });
-    respond_json(request, response.status, response.body);
+    respond_json(request, response.status, response.body, origin.as_deref());
 }
 
 struct ApiResponse {
@@ -224,6 +229,7 @@ fn handle_request(
             "enabled": api_enabled(app),
             "mcpEnabled": api_mcp_enabled(app),
             "allowUnauthenticated": api_allow_unauthenticated(app),
+            "allowLanAccess": api_allow_lan_access(app),
         }));
     }
     if !path.starts_with(API_PREFIX) {
@@ -316,38 +322,34 @@ fn read_body(request: &mut tiny_http::Request) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Request body must be UTF-8".to_string())
 }
 
-fn respond_error(request: tiny_http::Request, status: u16, message: &str) {
-    respond_json(request, status, json!({ "ok": false, "error": message }));
+fn respond_error(request: tiny_http::Request, status: u16, message: &str, origin: Option<&str>) {
+    respond_json(
+        request,
+        status,
+        json!({ "ok": false, "error": message }),
+        origin,
+    );
 }
 
-fn respond_options(request: tiny_http::Request) {
+fn respond_options(request: tiny_http::Request, origin: Option<&str>) {
     let mut response = Response::empty(StatusCode(204));
-    for header in cors_headers() {
+    for header in cors_headers(origin) {
         response.add_header(header);
     }
     response.add_header(Header::from_bytes("Access-Control-Max-Age", "600").unwrap());
     let _ = request.respond(response);
 }
 
-fn respond_json(request: tiny_http::Request, status: u16, body: Value) {
+fn respond_json(request: tiny_http::Request, status: u16, body: Value, origin: Option<&str>) {
     let mut response = Response::from_string(body.to_string()).with_status_code(StatusCode(status));
-    for header in cors_headers() {
+    for header in cors_headers(origin) {
         response.add_header(header);
     }
     let _ = request.respond(response);
 }
 
-fn cors_headers() -> Vec<Header> {
-    vec![
-        Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
-        Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS").unwrap(),
-        Header::from_bytes(
-            "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-LLM-Wiki-Token",
-        )
-        .unwrap(),
-        Header::from_bytes("Content-Type", "application/json").unwrap(),
-    ]
+fn cors_headers(origin: Option<&str>) -> Vec<Header> {
+    local_cors_headers(origin, "Content-Type, Authorization, X-LLM-Wiki-Token")
 }
 
 fn split_url(url: &str) -> (String, &str) {
@@ -462,6 +464,17 @@ fn api_allow_unauthenticated(app: &AppHandle) -> bool {
     parsed
         .get("apiConfig")
         .and_then(|v| v.get("allowUnauthenticated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn api_allow_lan_access(app: &AppHandle) -> bool {
+    let Some(parsed) = load_app_state(app) else {
+        return false;
+    };
+    parsed
+        .get("apiConfig")
+        .and_then(|v| v.get("allowLanAccess"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
@@ -1018,6 +1031,64 @@ fn parse_review_query(query: &str) -> Result<ReviewQuery, String> {
     })
 }
 
+fn normalize_review_title(title: &str) -> String {
+    let trimmed = title.trim_start();
+    let lower = trimmed.to_lowercase();
+    let mut rest = trimmed;
+    for prefix in [
+        "missing page",
+        "missing-page",
+        "missingpage",
+        "duplicate page",
+        "duplicate-page",
+        "duplicatepage",
+        "possible duplicate",
+        "possible-duplicate",
+        "possibleduplicate",
+        "缺失页面",
+        "缺少页面",
+        "重复页面",
+        "疑似重复",
+    ] {
+        if !lower.starts_with(prefix) {
+            continue;
+        }
+        let suffix = &trimmed[prefix.len()..];
+        let Some(delimiter) = suffix.chars().next() else {
+            continue;
+        };
+        if delimiter == ':' || delimiter == '：' {
+            rest = suffix[delimiter.len_utf8()..].trim_start();
+            break;
+        }
+    }
+    rest.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn review_id_for_parts(item_type: &str, title: &str) -> String {
+    let key = format!("{item_type}::{}", normalize_review_title(title));
+    let mut h: u32 = 0x811c9dc5;
+    for unit in key.encode_utf16() {
+        h ^= u32::from(unit);
+        h = h.wrapping_mul(0x01000193);
+    }
+    format!("review-{h:08x}")
+}
+
+fn stable_review_id(item: &Value) -> Option<String> {
+    let item_type = item.get("type").and_then(Value::as_str)?;
+    let title = item.get("title").and_then(Value::as_str)?;
+    Some(review_id_for_parts(item_type, title))
+}
+
+fn review_id_matches(item: &Value, requested_id: &str) -> bool {
+    item.get("id").and_then(Value::as_str) == Some(requested_id)
+        || stable_review_id(item).as_deref() == Some(requested_id)
+}
+
 fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Value>, String> {
     let path = Path::new(project_path).join(".llm-wiki/review.json");
     let raw = match fs::read_to_string(&path) {
@@ -1031,8 +1102,26 @@ fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Valu
         .as_array()
         .ok_or_else(|| "Invalid review state JSON: expected an array".to_string())?;
 
-    let mut reviews = Vec::new();
+    let mut normalized: Vec<Value> = Vec::new();
+    let mut index_by_id: BTreeMap<String, usize> = BTreeMap::new();
     for item in items {
+        let sanitized = sanitize_review_item(item);
+        let id = sanitized
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(id) = id {
+            if let Some(existing_idx) = index_by_id.get(&id).copied() {
+                merge_sanitized_review(&mut normalized[existing_idx], &sanitized);
+                continue;
+            }
+            index_by_id.insert(id, normalized.len());
+        }
+        normalized.push(sanitized);
+    }
+
+    let mut reviews: Vec<Value> = Vec::new();
+    for item in normalized {
         let resolved = item
             .get("resolved")
             .and_then(Value::as_bool)
@@ -1045,10 +1134,10 @@ fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Valu
                 continue;
             }
         }
-        reviews.push(sanitize_review_item(item));
         if reviews.len() >= query.limit {
             break;
         }
+        reviews.push(item);
     }
 
     Ok(reviews)
@@ -1056,7 +1145,11 @@ fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Valu
 
 fn sanitize_review_item(item: &Value) -> Value {
     let mut out = Map::new();
-    copy_string_field(item, &mut out, "id");
+    if let Some(id) = stable_review_id(item) {
+        out.insert("id".to_string(), Value::String(id));
+    } else {
+        copy_string_field(item, &mut out, "id");
+    }
     copy_string_field(item, &mut out, "type");
     copy_string_field(item, &mut out, "title");
     copy_string_field(item, &mut out, "description");
@@ -1068,6 +1161,124 @@ fn sanitize_review_item(item: &Value) -> Value {
     copy_string_field(item, &mut out, "resolvedAction");
     copy_number_field(item, &mut out, "createdAt");
     Value::Object(out)
+}
+
+fn merge_sanitized_review(existing: &mut Value, incoming: &Value) {
+    let Some(existing) = existing.as_object_mut() else {
+        return;
+    };
+    let Some(incoming) = incoming.as_object() else {
+        return;
+    };
+
+    let resolved = existing
+        .get("resolved")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || incoming
+            .get("resolved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    existing.insert("resolved".to_string(), Value::Bool(resolved));
+
+    if resolved && !existing.contains_key("resolvedAction") {
+        if let Some(action) = incoming.get("resolvedAction").and_then(Value::as_str) {
+            existing.insert(
+                "resolvedAction".to_string(),
+                Value::String(action.to_string()),
+            );
+        }
+    }
+
+    for key in ["description", "sourcePath"] {
+        let existing_empty = existing
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::is_empty)
+            .unwrap_or(true);
+        if existing_empty {
+            if let Some(value) = incoming.get(key).and_then(Value::as_str) {
+                existing.insert(key.to_string(), Value::String(value.to_string()));
+            }
+        }
+    }
+
+    merge_string_array_field(existing, incoming, "affectedPages");
+    merge_string_array_field(existing, incoming, "searchQueries");
+    merge_review_options_field(existing, incoming);
+
+    if let Some(incoming_created) = incoming.get("createdAt").and_then(Value::as_f64) {
+        let existing_created = existing
+            .get("createdAt")
+            .and_then(Value::as_f64)
+            .unwrap_or(incoming_created);
+        existing.insert(
+            "createdAt".to_string(),
+            json!(existing_created.min(incoming_created)),
+        );
+    }
+}
+
+fn merge_string_array_field(
+    existing: &mut Map<String, Value>,
+    incoming: &Map<String, Value>,
+    key: &str,
+) {
+    let mut values = existing
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for value in incoming
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+    if !values.is_empty() {
+        existing.insert(
+            key.to_string(),
+            Value::Array(values.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn merge_review_options_field(existing: &mut Map<String, Value>, incoming: &Map<String, Value>) {
+    let mut options = existing
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for option in incoming
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let action = option.get("action").and_then(Value::as_str);
+        let already_present = action.is_some_and(|action| {
+            options
+                .iter()
+                .any(|existing| existing.get("action").and_then(Value::as_str) == Some(action))
+        });
+        if !already_present {
+            options.push(option.clone());
+        }
+    }
+    if !options.is_empty() {
+        existing.insert("options".to_string(), Value::Array(options));
+    }
 }
 
 fn copy_string_field(item: &Value, out: &mut Map<String, Value>, key: &str) {
@@ -1259,12 +1470,16 @@ fn patch_review_item(
 
     let mut found = false;
     for item in items.iter_mut() {
-        if item.get("id").and_then(Value::as_str) != Some(review_id) {
+        if !review_id_matches(item, review_id) {
             continue;
         }
         apply_resolution(item, resolved, action);
+        if let Some(stable_id) = stable_review_id(item) {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("id".to_string(), Value::String(stable_id));
+            }
+        }
         found = true;
-        break;
     }
 
     if !found {
@@ -1294,15 +1509,23 @@ fn resolve_review_items(
         .as_array_mut()
         .ok_or_else(|| "Invalid review state JSON: expected an array".to_string())?;
 
-    let requested: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
     let mut found: BTreeSet<String> = BTreeSet::new();
     for item in items.iter_mut() {
-        let id = match item.get("id").and_then(Value::as_str) {
-            Some(id) if requested.contains(id) => id.to_string(),
-            _ => continue,
+        let raw_id = item.get("id").and_then(Value::as_str);
+        let stable_id = stable_review_id(item);
+        let matched_request = ids
+            .iter()
+            .find(|id| raw_id == Some(id.as_str()) || stable_id.as_deref() == Some(id.as_str()));
+        let Some(requested_id) = matched_request else {
+            continue;
         };
         apply_resolution(item, true, action);
-        found.insert(id);
+        if let Some(stable_id) = stable_id {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("id".to_string(), Value::String(stable_id));
+            }
+        }
+        found.insert(requested_id.clone());
     }
 
     if !found.is_empty() {
@@ -1310,7 +1533,11 @@ fn resolve_review_items(
     }
 
     // Preserve the caller's input order; dedupe is implicit via `found`.
-    let resolved: Vec<String> = ids.iter().filter(|id| found.contains(*id)).cloned().collect();
+    let resolved: Vec<String> = ids
+        .iter()
+        .filter(|id| found.contains(*id))
+        .cloned()
+        .collect();
     let not_found: Vec<String> = ids
         .iter()
         .filter(|id| !found.contains(*id))
@@ -1323,8 +1550,13 @@ fn resolve_review_items(
 fn apply_resolution(item: &mut Value, resolved: bool, action: Option<&str>) {
     if let Some(obj) = item.as_object_mut() {
         obj.insert("resolved".to_string(), Value::Bool(resolved));
-        if let Some(action) = action {
-            obj.insert("resolvedAction".to_string(), Value::String(action.to_string()));
+        if !resolved {
+            obj.remove("resolvedAction");
+        } else if let Some(action) = action {
+            obj.insert(
+                "resolvedAction".to_string(),
+                Value::String(action.to_string()),
+            );
         }
     }
 }
@@ -1722,9 +1954,49 @@ mod tests {
 
         assert_eq!(query.status.as_str(), "unresolved");
         assert_eq!(reviews.len(), 1);
-        assert_eq!(reviews[0].get("id").and_then(Value::as_str), Some("r1"));
+        assert_eq!(
+            reviews[0].get("id").and_then(Value::as_str),
+            Some(review_id_for_parts("missing-page", "Missing page: Attention").as_str())
+        );
         assert!(reviews[0].get("internalSecret").is_none());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_title_normalization_requires_a_prefix_delimiter() {
+        assert_eq!(
+            normalize_review_title("Missing page: Attention"),
+            "attention"
+        );
+        assert_eq!(
+            normalize_review_title(" Missing page: Attention"),
+            "attention"
+        );
+        assert_eq!(
+            normalize_review_title("Missing page Attention"),
+            "missing page attention"
+        );
+        assert_eq!(normalize_review_title("疑似重复 注意力"), "疑似重复 注意力");
+        assert_ne!(
+            review_id_for_parts("missing-page", "Missing page: Attention"),
+            review_id_for_parts("missing-page", "Missing page Attention")
+        );
+        assert_eq!(
+            review_id_for_parts("missing-page", "Missing page: Attention"),
+            "review-dbdcf949"
+        );
+        assert_eq!(
+            review_id_for_parts("missing-page", " Missing page: Attention"),
+            "review-dbdcf949"
+        );
+        assert_eq!(
+            review_id_for_parts("missing-page", "Missing page Attention"),
+            "review-fa5d9960"
+        );
+        assert_eq!(
+            review_id_for_parts("missing-page", "疑似重复 注意力"),
+            "review-d2dacda0"
+        );
     }
 
     #[test]
@@ -1735,8 +2007,8 @@ mod tests {
         fs::write(
             state_dir.join("review.json"),
             json!([
-                { "id": "r1", "type": "missing-page", "resolved": false, "createdAt": 1 },
-                { "id": "r2", "type": "missing-page", "resolved": false, "createdAt": 2 },
+                { "id": "r1", "type": "missing-page", "title": "r1", "resolved": false, "createdAt": 1 },
+                { "id": "r2", "type": "missing-page", "title": "r2", "resolved": false, "createdAt": 2 },
                 { "id": "r3", "type": "duplicate", "resolved": false, "createdAt": 3 },
                 { "id": "r4", "type": "missing-page", "resolved": true, "createdAt": 4 }
             ])
@@ -1752,8 +2024,116 @@ mod tests {
             reviews
                 .iter()
                 .filter_map(|r| r.get("id").and_then(Value::as_str))
+                .map(str::to_string)
                 .collect::<Vec<_>>(),
-            vec!["r1", "r2"]
+            vec![
+                review_id_for_parts("missing-page", "r1"),
+                review_id_for_parts("missing-page", "r2"),
+            ]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_query_collapses_legacy_duplicate_ids_to_stable_id() {
+        let root = test_project_dir();
+        let state_dir = root.join(".llm-wiki");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join("review.json"),
+            json!([
+                {
+                    "id": "review-1",
+                    "type": "missing-page",
+                    "title": "Attention",
+                    "description": "",
+                    "affectedPages": ["a.md"],
+                    "resolved": false,
+                    "createdAt": 5
+                },
+                {
+                    "id": "review-2",
+                    "type": "missing-page",
+                    "title": "Missing page: Attention",
+                    "description": "resolved copy",
+                    "affectedPages": ["b.md"],
+                    "resolved": true,
+                    "resolvedAction": "user-resolved",
+                    "createdAt": 2
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let query = parse_review_query("status=all").unwrap();
+        let reviews = load_review_items(root.to_str().unwrap(), &query).unwrap();
+
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].get("id").and_then(Value::as_str),
+            Some(review_id_for_parts("missing-page", "Attention").as_str())
+        );
+        assert_eq!(
+            reviews[0].get("resolved").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            reviews[0].get("resolvedAction").and_then(Value::as_str),
+            Some("user-resolved")
+        );
+        assert_eq!(
+            reviews[0]
+                .get("affectedPages")
+                .and_then(Value::as_array)
+                .map(|pages| pages.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+            Some(vec!["a.md", "b.md"])
+        );
+        assert_eq!(
+            reviews[0].get("createdAt").and_then(Value::as_f64),
+            Some(2.0)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_query_filters_status_after_stable_id_merge() {
+        let root = test_project_dir();
+        let state_dir = root.join(".llm-wiki");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join("review.json"),
+            json!([
+                {
+                    "id": "review-old-unresolved",
+                    "type": "missing-page",
+                    "title": "Attention",
+                    "resolved": false,
+                    "createdAt": 5
+                },
+                {
+                    "id": "review-old-resolved",
+                    "type": "missing-page",
+                    "title": "Missing page: Attention",
+                    "resolved": true,
+                    "resolvedAction": "Done",
+                    "createdAt": 6
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let unresolved = parse_review_query("status=unresolved").unwrap();
+        let unresolved_reviews = load_review_items(root.to_str().unwrap(), &unresolved).unwrap();
+        assert!(unresolved_reviews.is_empty());
+
+        let all = parse_review_query("status=all").unwrap();
+        let all_reviews = load_review_items(root.to_str().unwrap(), &all).unwrap();
+        assert_eq!(all_reviews.len(), 1);
+        assert_eq!(
+            all_reviews[0].get("resolved").and_then(Value::as_bool),
+            Some(true)
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -1799,7 +2179,10 @@ mod tests {
             .find(|i| i.get("id").and_then(Value::as_str) == Some("r1"))
             .unwrap();
         assert_eq!(r1.get("resolved").and_then(Value::as_bool), Some(true));
-        assert_eq!(r1.get("resolvedAction").and_then(Value::as_str), Some("Skip"));
+        assert_eq!(
+            r1.get("resolvedAction").and_then(Value::as_str),
+            Some("Skip")
+        );
         assert_eq!(
             r1.get("internalSecret").and_then(Value::as_str),
             Some("keep-me")
@@ -1809,6 +2192,40 @@ mod tests {
             .find(|i| i.get("id").and_then(Value::as_str) == Some("r2"))
             .unwrap();
         assert_eq!(r2.get("resolved").and_then(Value::as_bool), Some(false));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_review_item_accepts_stable_id_for_legacy_counter_item() {
+        let root = test_project_dir();
+        write_reviews(
+            &root,
+            json!([
+                {
+                    "id": "review-1",
+                    "type": "missing-page",
+                    "title": "Missing page: Attention",
+                    "resolved": false
+                }
+            ]),
+        );
+
+        let stable_id = review_id_for_parts("missing-page", "Attention");
+        let found =
+            patch_review_item(root.to_str().unwrap(), &stable_id, true, Some("API")).unwrap();
+        assert!(found);
+
+        let parsed = read_reviews(&root);
+        let item = &parsed.as_array().unwrap()[0];
+        assert_eq!(
+            item.get("id").and_then(Value::as_str),
+            Some(stable_id.as_str())
+        );
+        assert_eq!(item.get("resolved").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            item.get("resolvedAction").and_then(Value::as_str),
+            Some("API")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1826,6 +2243,7 @@ mod tests {
         let parsed = read_reviews(&root);
         let r1 = &parsed.as_array().unwrap()[0];
         assert_eq!(r1.get("resolved").and_then(Value::as_bool), Some(false));
+        assert!(r1.get("resolvedAction").is_none());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1875,16 +2293,76 @@ mod tests {
                 .find(|i| i.get("id").and_then(Value::as_str) == Some(id))
                 .unwrap()
         };
-        assert_eq!(by_id("r1").get("resolved").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            by_id("r1").get("resolved").and_then(Value::as_bool),
+            Some(true)
+        );
         assert_eq!(
             by_id("r1").get("resolvedAction").and_then(Value::as_str),
             Some("Bulk")
         );
         // Unsanitized field survives the bulk write-back too.
-        assert_eq!(by_id("r1").get("internalSecret").and_then(Value::as_str), Some("a"));
-        assert_eq!(by_id("r3").get("resolved").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            by_id("r1").get("internalSecret").and_then(Value::as_str),
+            Some("a")
+        );
+        assert_eq!(
+            by_id("r3").get("resolved").and_then(Value::as_bool),
+            Some(true)
+        );
         // r2 was not in the request — untouched.
-        assert_eq!(by_id("r2").get("resolved").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            by_id("r2").get("resolved").and_then(Value::as_bool),
+            Some(false)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_review_items_accepts_stable_ids_for_legacy_counter_items() {
+        let root = test_project_dir();
+        write_reviews(
+            &root,
+            json!([
+                {
+                    "id": "review-1",
+                    "type": "missing-page",
+                    "title": "Missing page: Attention",
+                    "resolved": false
+                },
+                {
+                    "id": "review-2",
+                    "type": "duplicate",
+                    "title": "Duplicate page: Transformer",
+                    "resolved": false
+                }
+            ]),
+        );
+
+        let ids = vec![
+            review_id_for_parts("missing-page", "Attention"),
+            "missing".to_string(),
+        ];
+        let (resolved, not_found) =
+            resolve_review_items(root.to_str().unwrap(), &ids, Some("Bulk")).unwrap();
+
+        assert_eq!(resolved, vec![ids[0].clone()]);
+        assert_eq!(not_found, vec!["missing".to_string()]);
+        let parsed = read_reviews(&root);
+        let items = parsed.as_array().unwrap();
+        assert_eq!(
+            items[0].get("id").and_then(Value::as_str),
+            Some(ids[0].as_str())
+        );
+        assert_eq!(
+            items[0].get("resolved").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(items[1].get("id").and_then(Value::as_str), Some("review-2"));
+        assert_eq!(
+            items[1].get("resolved").and_then(Value::as_bool),
+            Some(false)
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1892,7 +2370,8 @@ mod tests {
     fn resolve_review_items_missing_file_reports_all_not_found() {
         let root = test_project_dir();
         let ids = vec!["r1".to_string(), "r2".to_string()];
-        let (resolved, not_found) = resolve_review_items(root.to_str().unwrap(), &ids, None).unwrap();
+        let (resolved, not_found) =
+            resolve_review_items(root.to_str().unwrap(), &ids, None).unwrap();
         assert!(resolved.is_empty());
         assert_eq!(not_found, ids);
         let _ = fs::remove_dir_all(root);
@@ -1960,6 +2439,7 @@ mod tests {
             "apiConfig": {
                 "enabled": false,
                 "allowUnauthenticated": true,
+                "allowLanAccess": true,
                 "mcpEnabled": true,
                 "token": "abc"
             }
@@ -1976,6 +2456,12 @@ mod tests {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         assert!(allow_unauthenticated);
+        let allow_lan_access = payload
+            .get("apiConfig")
+            .and_then(|v| v.get("allowLanAccess"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        assert!(allow_lan_access);
         let mcp_enabled = payload
             .get("apiConfig")
             .and_then(|v| v.get("mcpEnabled"))
@@ -2005,5 +2491,11 @@ mod tests {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         assert!(!mcp_enabled_missing);
+        let allow_lan_access_missing = missing
+            .get("apiConfig")
+            .and_then(|v| v.get("allowLanAccess"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        assert!(!allow_lan_access_missing);
     }
 }
