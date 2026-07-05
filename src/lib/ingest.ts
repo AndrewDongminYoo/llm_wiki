@@ -1198,19 +1198,6 @@ async function autoIngestImpl(
     }
   }
 
-  // Surface parser / writer warnings to the activity panel so users
-  // don't have to open devtools to find out a block was dropped.
-  // Keeping the base "Writing files..." detail on top and appending the
-  // first few warnings; full list is also persisted to .llm-wiki.
-  let warningSummary = ""
-  if (writeWarnings.length > 0) {
-    await appendIngestWarningLog(pp, sourceIdentity, writeWarnings)
-    warningSummary = writeWarnings.length === 1
-      ? writeWarnings[0]
-      : `${writeWarnings.length} ingest warnings: ${writeWarnings.slice(0, 2).join(" · ")}${writeWarnings.length > 2 ? ` … (+${writeWarnings.length - 2} more in .llm-wiki/ingest-warnings.log)` : ""}`
-    activity.updateItem(activityId, { detail: `${warningSummary} — saved to .llm-wiki/ingest-warnings.log` })
-  }
-
   // Ensure source summary page exists (LLM may not have generated it correctly)
   const sourceSummaryFullPath = `${pp}/${sourceSummaryPath}`
   const hasSourceSummary = writtenPaths.some((p) => normalizePath(p) === sourceSummaryPath)
@@ -1274,6 +1261,20 @@ async function autoIngestImpl(
       console.warn(`[ingest] ${msg}`)
       writeWarnings.push(msg)
     }
+  }
+
+  // Surface parser / writer / aggregate warnings to the activity panel so
+  // users don't have to open devtools to find out a block was dropped or
+  // aggregate regen failed. Runs AFTER Step 3.6 so late-added warnings
+  // (from regenerateAggregateFiles) are included in both the log and the
+  // activity detail. Full list is also persisted to .llm-wiki.
+  let warningSummary = ""
+  if (writeWarnings.length > 0) {
+    await appendIngestWarningLog(pp, sourceIdentity, writeWarnings)
+    warningSummary = writeWarnings.length === 1
+      ? writeWarnings[0]
+      : `${writeWarnings.length} ingest warnings: ${writeWarnings.slice(0, 2).join(" · ")}${writeWarnings.length > 2 ? ` … (+${writeWarnings.length - 2} more in .llm-wiki/ingest-warnings.log)` : ""}`
+    activity.updateItem(activityId, { detail: `${warningSummary} — saved to .llm-wiki/ingest-warnings.log` })
   }
 
   if (writtenPaths.length > 0) {
