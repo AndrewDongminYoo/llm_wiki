@@ -200,6 +200,29 @@ describe("mergePageContent — LLM merge", () => {
     expect(out).toContain("account: work");
     expect(out).not.toContain("something-else");
   });
+
+  it("fully removes a block-form locked field the LLM emitted (no orphaned list items)", async () => {
+    // Locked fields are scalars by contract. If the LLM emits one in
+    // block form (`scope:` + indented list items), forcing the scalar
+    // back must consume the whole entry — replacing only the `scope:`
+    // line would leave the indented items behind and corrupt the YAML.
+    const existing = PAGE(
+      "type: concept\ntitle: Foo\nscope: project\nproject: rn-receipt\naccount: work",
+      "original body content",
+    );
+    const incoming = PAGE("type: concept\ntitle: Foo", "new content");
+    const merger = vi.fn().mockResolvedValue(
+      PAGE(
+        "type: concept\ntitle: Foo\nscope:\n  - project\n  - global\nproject: rn-receipt\naccount: work",
+        "merged body that is long enough to clear the seventy percent threshold",
+      ),
+    );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("scope: project");
+    // The block-form list items must be gone, not orphaned under the scalar.
+    expect(out).not.toContain("- global");
+    expect(out).not.toMatch(/scope: project\n\s+-/);
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────
