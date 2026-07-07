@@ -7,17 +7,17 @@
  * test suite exercises the wired-up production path against the
  * actual generation model.
  */
-import { describe, it, expect, vi } from "vitest"
-import { mergePageContent } from "./page-merge"
+import { describe, it, expect, vi } from "vitest";
+import { mergePageContent } from "./page-merge";
 
-const PAGE = (fm: string, body: string) => `---\n${fm}\n---\n\n${body}`
+const PAGE = (fm: string, body: string) => `---\n${fm}\n---\n\n${body}`;
 
-const FIXED_TODAY = () => "2026-04-30"
+const FIXED_TODAY = () => "2026-04-30";
 const baseOpts = {
   sourceFileName: "doc-B.pdf",
   pagePath: "wiki/entities/foo.md",
   today: FIXED_TODAY,
-}
+};
 
 // ──────────────────────────────────────────────────────────────────
 // Fast paths — no LLM call should happen
@@ -25,44 +25,64 @@ const baseOpts = {
 
 describe("mergePageContent — fast paths", () => {
   it("returns newContent when existingContent is null (new page)", async () => {
-    const merger = vi.fn()
+    const merger = vi.fn();
     const out = await mergePageContent(
       PAGE('type: entity\ntitle: Foo\nsources: ["doc.pdf"]', "body"),
       null,
       merger,
       baseOpts,
-    )
-    expect(out).toContain('sources: ["doc.pdf"]')
-    expect(merger).not.toHaveBeenCalled()
-  })
+    );
+    expect(out).toContain('sources: ["doc.pdf"]');
+    expect(merger).not.toHaveBeenCalled();
+  });
 
   it("returns existingContent when both contents are byte-identical", async () => {
-    const merger = vi.fn()
-    const c = PAGE("type: entity\ntitle: Foo", "body")
-    const out = await mergePageContent(c, c, merger, baseOpts)
-    expect(out).toBe(c)
-    expect(merger).not.toHaveBeenCalled()
-  })
+    const merger = vi.fn();
+    const c = PAGE("type: entity\ntitle: Foo", "body");
+    const out = await mergePageContent(c, c, merger, baseOpts);
+    expect(out).toBe(c);
+    expect(merger).not.toHaveBeenCalled();
+  });
 
   it("skips LLM when bodies are identical (only sources differ)", async () => {
     // Re-ingest of the same file from a different source just adds
     // its source filename — body is byte-identical. Don't waste an
     // LLM call on this.
-    const merger = vi.fn()
+    const merger = vi.fn();
     const existing = PAGE(
       'type: entity\ntitle: Foo\nsources: ["a.pdf"]',
       "same body",
-    )
+    );
     const incoming = PAGE(
       'type: entity\ntitle: Foo\nsources: ["b.pdf"]',
       "same body",
-    )
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
-    expect(out).toContain('sources: ["a.pdf", "b.pdf"]')
-    expect(out).toContain("same body")
-    expect(merger).not.toHaveBeenCalled()
-  })
-})
+    );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain('sources: ["a.pdf", "b.pdf"]');
+    expect(out).toContain("same body");
+    expect(merger).not.toHaveBeenCalled();
+  });
+
+  it("preserves locked scope/project/account on the identical-body fast path", async () => {
+    // Same body, only frontmatter differs -> fast path returns
+    // array-merged content with no LLM. Incoming omits the facets; they
+    // must still be forced back from the existing page.
+    const merger = vi.fn();
+    const existing = PAGE(
+      'type: entity\ntitle: Foo\nscope: project\nproject: rn-receipt\naccount: work\nsources: ["a.pdf"]',
+      "same body",
+    );
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\nsources: ["b.pdf"]',
+      "same body",
+    );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("scope: project");
+    expect(out).toContain("project: rn-receipt");
+    expect(out).toContain("account: work");
+    expect(merger).not.toHaveBeenCalled();
+  });
+});
 
 // ──────────────────────────────────────────────────────────────────
 // LLM merge happy path
@@ -73,64 +93,114 @@ describe("mergePageContent — LLM merge", () => {
     const existing = PAGE(
       'type: entity\ntitle: Accumulibacter\ncreated: 2026-04-09\ntags: [microbiology, ebpr]\nrelated: [dpao, vfa]\nsources: ["doc-A.pdf"]',
       "## Anaerobic Phase\n\nDescription from doc A.\n\n## Denitrification\n\nMore from doc A.",
-    )
+    );
     const incoming = PAGE(
       'type: entity\ntitle: Accumulibacter\ncreated: 2026-04-30\ntags: [paos, propionate]\nrelated: [pha]\nsources: ["doc-B.pdf"]',
       "## Carbon Source Preferences\n\nDescription from doc B.\n\n## Acetate vs Propionate\n\nMore from doc B.",
-    )
-    const mergedBody = "## Anaerobic Phase\n\nDescription from doc A.\n\n## Denitrification\n\nMore from doc A.\n\n## Carbon Source Preferences\n\nDescription from doc B.\n\n## Acetate vs Propionate\n\nMore from doc B."
+    );
+    const mergedBody =
+      "## Anaerobic Phase\n\nDescription from doc A.\n\n## Denitrification\n\nMore from doc A.\n\n## Carbon Source Preferences\n\nDescription from doc B.\n\n## Acetate vs Propionate\n\nMore from doc B.";
     const merger = vi.fn().mockResolvedValue(
       PAGE(
         // LLM might also output frontmatter — we'll override locked fields.
         'type: entity\ntitle: Accumulibacter\ncreated: 2026-04-09\ntags: [paos, propionate]\nrelated: [pha]\nsources: ["doc-B.pdf"]',
         mergedBody,
       ),
-    )
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+    );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
 
-    expect(merger).toHaveBeenCalledOnce()
+    expect(merger).toHaveBeenCalledOnce();
 
     // Body uses LLM-merged version
-    expect(out).toContain("Anaerobic Phase")
-    expect(out).toContain("Carbon Source Preferences")
+    expect(out).toContain("Anaerobic Phase");
+    expect(out).toContain("Carbon Source Preferences");
 
     // Locked fields preserved from existing
-    expect(out).toContain("title: Accumulibacter")
-    expect(out).toContain("created: 2026-04-09")
-    expect(out).toContain("type: entity")
+    expect(out).toContain("title: Accumulibacter");
+    expect(out).toContain("created: 2026-04-09");
+    expect(out).toContain("type: entity");
 
     // updated forced to today
-    expect(out).toContain("updated: 2026-04-30")
+    expect(out).toContain("updated: 2026-04-30");
 
     // Array fields are unions
-    expect(out).toMatch(/sources:\s*\[\s*"doc-A.pdf",\s*"doc-B.pdf"\s*\]/)
-    expect(out).toMatch(/tags:\s*\[\s*"microbiology",\s*"ebpr",\s*"paos",\s*"propionate"\s*\]/)
-    expect(out).toMatch(/related:\s*\[\s*"dpao",\s*"vfa",\s*"pha"\s*\]/)
-  })
+    expect(out).toMatch(/sources:\s*\[\s*"doc-A.pdf",\s*"doc-B.pdf"\s*\]/);
+    expect(out).toMatch(
+      /tags:\s*\[\s*"microbiology",\s*"ebpr",\s*"paos",\s*"propionate"\s*\]/,
+    );
+    expect(out).toMatch(/related:\s*\[\s*"dpao",\s*"vfa",\s*"pha"\s*\]/);
+  });
 
   it("preserves locked title even if LLM rewrote it", async () => {
     // Title changes break wikilinks — never accept LLM-rewritten title.
-    const existing = PAGE("type: entity\ntitle: Accumulibacter", "old body content here")
-    const incoming = PAGE("type: entity\ntitle: Accumulibacter", "very different new body here")
-    const merger = vi.fn().mockResolvedValue(
-      PAGE("type: entity\ntitle: ACCUMULIBACTER (renamed)", "merged body that is reasonably long enough to pass the threshold check"),
-    )
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
-    expect(out).toContain("title: Accumulibacter")
-    expect(out).not.toContain("ACCUMULIBACTER (renamed)")
-  })
+    const existing = PAGE(
+      "type: entity\ntitle: Accumulibacter",
+      "old body content here",
+    );
+    const incoming = PAGE(
+      "type: entity\ntitle: Accumulibacter",
+      "very different new body here",
+    );
+    const merger = vi
+      .fn()
+      .mockResolvedValue(
+        PAGE(
+          "type: entity\ntitle: ACCUMULIBACTER (renamed)",
+          "merged body that is reasonably long enough to pass the threshold check",
+        ),
+      );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("title: Accumulibacter");
+    expect(out).not.toContain("ACCUMULIBACTER (renamed)");
+  });
 
   it("preserves locked type even if LLM changed it", async () => {
-    const existing = PAGE("type: entity\ntitle: Foo", "original body content")
-    const incoming = PAGE("type: entity\ntitle: Foo", "new content from another source")
+    const existing = PAGE("type: entity\ntitle: Foo", "original body content");
+    const incoming = PAGE(
+      "type: entity\ntitle: Foo",
+      "new content from another source",
+    );
+    const merger = vi
+      .fn()
+      .mockResolvedValue(
+        PAGE(
+          "type: concept\ntitle: Foo",
+          "merged body that is long enough to clear the seventy percent threshold",
+        ),
+      );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("type: entity");
+    expect(out).not.toContain("type: concept");
+  });
+
+  it("preserves locked scope/project/account even if the LLM changes or drops them", async () => {
+    // scope/project/account are deterministic facets seeded downstream
+    // (path-derived scope/project; a project->account map for account).
+    // The LLM must never be able to rewrite or silently drop them on a
+    // re-ingest — otherwise the account-separation boundary and scoped
+    // retrieval break.
+    const existing = PAGE(
+      "type: concept\ntitle: Foo\nscope: project\nproject: react-native-receipt-scanner\naccount: work",
+      "original body content",
+    );
+    const incoming = PAGE(
+      "type: concept\ntitle: Foo",
+      "new content from another source",
+    );
     const merger = vi.fn().mockResolvedValue(
-      PAGE("type: concept\ntitle: Foo", "merged body that is long enough to clear the seventy percent threshold"),
-    )
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
-    expect(out).toContain("type: entity")
-    expect(out).not.toContain("type: concept")
-  })
-})
+      // LLM drops scope/account entirely and emits a wrong project.
+      PAGE(
+        "type: concept\ntitle: Foo\nproject: something-else",
+        "merged body that is long enough to clear the seventy percent threshold",
+      ),
+    );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("scope: project");
+    expect(out).toContain("project: react-native-receipt-scanner");
+    expect(out).toContain("account: work");
+    expect(out).not.toContain("something-else");
+  });
+});
 
 // ──────────────────────────────────────────────────────────────────
 // LLM failure / sanity rejection — always falls back safely
@@ -141,84 +211,164 @@ describe("mergePageContent — LLM failure fallback", () => {
     const existing = PAGE(
       'type: entity\ntitle: Foo\ntags: [old]\nsources: ["a.pdf"]',
       "old body content",
-    )
+    );
     const incoming = PAGE(
       'type: entity\ntitle: Foo\ntags: [new]\nsources: ["b.pdf"]',
       "new body content",
-    )
-    const merger = vi.fn().mockRejectedValue(new Error("LLM rate limited"))
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM rate limited"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
 
     // Array fields are still merged (no LLM needed for that)
-    expect(out).toMatch(/tags:\s*\[\s*"old",\s*"new"\s*\]/)
-    expect(out).toMatch(/sources:\s*\[\s*"a.pdf",\s*"b.pdf"\s*\]/)
+    expect(out).toMatch(/tags:\s*\[\s*"old",\s*"new"\s*\]/);
+    expect(out).toMatch(/sources:\s*\[\s*"a.pdf",\s*"b.pdf"\s*\]/);
     // Body is the new (incoming) one — old body is lost; this is the
     // pre-LLM-merge behavior, the documented fallback contract.
-    expect(out).toContain("new body content")
-  })
+    expect(out).toContain("new body content");
+  });
+
+  it("preserves locked scope/project/account on the LLM-failure fallback", async () => {
+    // The fallback returns array-merged content that starts from the
+    // incoming (LLM) frontmatter. Locked facets must still be forced
+    // back, or a failed merge silently drops the account boundary.
+    const existing = PAGE(
+      'type: entity\ntitle: Foo\nscope: project\nproject: rn-receipt\naccount: work\nsources: ["a.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\nsources: ["b.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM rate limited"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("scope: project");
+    expect(out).toContain("project: rn-receipt");
+    expect(out).toContain("account: work");
+  });
+
+  it("preserves YAML quoting when locking a title that contains a colon", async () => {
+    // Source pages carry `title: "Source: ..."` (ingest.ts). The colon
+    // makes the value require quotes; writing the parsed value back raw
+    // would emit `title: Source: ...`, which js-yaml rejects — corrupting
+    // frontmatter that was valid on the way in.
+    const existing = PAGE(
+      'type: source\ntitle: "Source: invoice.pdf"\nsources: ["invoice.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: source\ntitle: "Source: invoice.pdf"\nsources: ["invoice.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM down"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain('title: "Source: invoice.pdf"');
+    expect(out).not.toMatch(/^title: Source: invoice\.pdf$/m);
+  });
+
+  it("preserves $ sequences in a locked value (no replacement-string expansion)", async () => {
+    // The locked value is used as a String.replace replacement, where
+    // `$1`/`$&`/`$'` are special. A title containing them must survive.
+    const existing = PAGE(
+      'type: source\ntitle: "Cost: $1 & $& literal"\nsources: ["a.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: source\ntitle: "LLM rewrote this"\nsources: ["b.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM down"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain('title: "Cost: $1 & $& literal"');
+  });
+
+  it("does not let an empty locked field consume the next frontmatter line", async () => {
+    // `\s*` after `field:` would span the newline and pull the following
+    // field's text into the empty one; the match must stay on its line.
+    const existing = PAGE(
+      'type: entity\ncreated:\ntitle: RealTitle\nsources: ["a.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: entity\ntitle: RealTitle\nsources: ["b.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM down"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).not.toContain("created: title:");
+  });
 
   it("rejects LLM output that shrinks body below 70% of max(old, new)", async () => {
-    const longBody = "long body content ".repeat(200) // ~3600 chars
-    const existing = PAGE("type: entity\ntitle: Foo", longBody)
-    const incoming = PAGE("type: entity\ntitle: Foo", "incoming body that is also pretty long " + longBody)
-    const merger = vi.fn().mockResolvedValue(
-      PAGE("type: entity\ntitle: Foo", "tiny merged body"),
-    )
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+    const longBody = "long body content ".repeat(200); // ~3600 chars
+    const existing = PAGE("type: entity\ntitle: Foo", longBody);
+    const incoming = PAGE(
+      "type: entity\ntitle: Foo",
+      "incoming body that is also pretty long " + longBody,
+    );
+    const merger = vi
+      .fn()
+      .mockResolvedValue(PAGE("type: entity\ntitle: Foo", "tiny merged body"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
     // Should fall back to incoming (array-merged) — not the tiny LLM output
-    expect(out).not.toContain("tiny merged body")
-    expect(out).toContain("incoming body that is also pretty long")
-  })
+    expect(out).not.toContain("tiny merged body");
+    expect(out).toContain("incoming body that is also pretty long");
+  });
 
   it("rejects LLM output that has no frontmatter at all", async () => {
-    const existing = PAGE("type: entity\ntitle: Foo", "old body content here")
-    const incoming = PAGE("type: entity\ntitle: Foo", "new body content here")
-    const merger = vi.fn().mockResolvedValue(
-      "raw markdown with no frontmatter at all and definitely no opening triple-dash",
-    )
-    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+    const existing = PAGE("type: entity\ntitle: Foo", "old body content here");
+    const incoming = PAGE("type: entity\ntitle: Foo", "new body content here");
+    const merger = vi
+      .fn()
+      .mockResolvedValue(
+        "raw markdown with no frontmatter at all and definitely no opening triple-dash",
+      );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
     // Falls back to incoming — never writes frontmatter-less output to disk
-    expect(out.startsWith("---")).toBe(true)
-    expect(out).toContain("new body content here")
-  })
+    expect(out.startsWith("---")).toBe(true);
+    expect(out).toContain("new body content here");
+  });
 
   it("calls the optional backup callback when falling back", async () => {
-    const existing = PAGE("type: entity\ntitle: Foo", "old body")
-    const incoming = PAGE("type: entity\ntitle: Foo", "new body")
-    const backup = vi.fn().mockResolvedValue(undefined)
-    const merger = vi.fn().mockRejectedValue(new Error("network error"))
+    const existing = PAGE("type: entity\ntitle: Foo", "old body");
+    const incoming = PAGE("type: entity\ntitle: Foo", "new body");
+    const backup = vi.fn().mockResolvedValue(undefined);
+    const merger = vi.fn().mockRejectedValue(new Error("network error"));
     await mergePageContent(incoming, existing, merger, {
       ...baseOpts,
       backup,
-    })
-    expect(backup).toHaveBeenCalledWith(existing)
-  })
+    });
+    expect(backup).toHaveBeenCalledWith(existing);
+  });
 
   it("does not call backup when LLM merge succeeds", async () => {
-    const existing = PAGE("type: entity\ntitle: Foo", "old body")
-    const incoming = PAGE("type: entity\ntitle: Foo", "new body content")
-    const backup = vi.fn().mockResolvedValue(undefined)
-    const merger = vi.fn().mockResolvedValue(
-      PAGE("type: entity\ntitle: Foo", "merged body that is long enough to clear the threshold check"),
-    )
+    const existing = PAGE("type: entity\ntitle: Foo", "old body");
+    const incoming = PAGE("type: entity\ntitle: Foo", "new body content");
+    const backup = vi.fn().mockResolvedValue(undefined);
+    const merger = vi
+      .fn()
+      .mockResolvedValue(
+        PAGE(
+          "type: entity\ntitle: Foo",
+          "merged body that is long enough to clear the threshold check",
+        ),
+      );
     await mergePageContent(incoming, existing, merger, {
       ...baseOpts,
       backup,
-    })
-    expect(backup).not.toHaveBeenCalled()
-  })
+    });
+    expect(backup).not.toHaveBeenCalled();
+  });
 
   it("backup failure is swallowed (best-effort, never blocks the write)", async () => {
-    const existing = PAGE("type: entity\ntitle: Foo", "old body")
-    const incoming = PAGE("type: entity\ntitle: Foo", "new body content")
-    const backup = vi.fn().mockRejectedValue(new Error("disk full"))
-    const merger = vi.fn().mockRejectedValue(new Error("network error"))
+    const existing = PAGE("type: entity\ntitle: Foo", "old body");
+    const incoming = PAGE("type: entity\ntitle: Foo", "new body content");
+    const backup = vi.fn().mockRejectedValue(new Error("disk full"));
+    const merger = vi.fn().mockRejectedValue(new Error("network error"));
 
     // Should still resolve — backup error must not propagate
     const out = await mergePageContent(incoming, existing, merger, {
       ...baseOpts,
       backup,
-    })
-    expect(out).toContain("new body content")
-  })
-})
+    });
+    expect(out).toContain("new body content");
+  });
+});
