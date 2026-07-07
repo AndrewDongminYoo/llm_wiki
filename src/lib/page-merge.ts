@@ -40,8 +40,13 @@ const UNION_FIELDS = ["sources", "tags", "related"] as const
  *     maps and any prose that references the title verbatim.
  *   - created: a one-time stamp; an "updated" stamp is computed
  *     separately.
+ *   - scope / project / account: deterministic classification facets
+ *     (scope = global|project, the source repo, and the personal|work
+ *     account boundary). They are seeded from the ingest source path
+ *     downstream, not inferred from content, so the LLM must never be
+ *     able to rewrite or drop them — account separation depends on it.
  */
-const LOCKED_FIELDS = ["type", "title", "created"] as const
+const LOCKED_FIELDS = ["type", "title", "created", "scope", "project", "account"] as const
 
 /**
  * Body length safety threshold. If the LLM's merged body is shorter

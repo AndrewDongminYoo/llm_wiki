@@ -130,6 +130,31 @@ describe("mergePageContent — LLM merge", () => {
     expect(out).toContain("type: entity")
     expect(out).not.toContain("type: concept")
   })
+
+  it("preserves locked scope/project/account even if the LLM changes or drops them", async () => {
+    // scope/project/account are deterministic facets seeded downstream
+    // (path-derived scope/project; a project->account map for account).
+    // The LLM must never be able to rewrite or silently drop them on a
+    // re-ingest — otherwise the account-separation boundary and scoped
+    // retrieval break.
+    const existing = PAGE(
+      "type: concept\ntitle: Foo\nscope: project\nproject: react-native-receipt-scanner\naccount: work",
+      "original body content",
+    )
+    const incoming = PAGE("type: concept\ntitle: Foo", "new content from another source")
+    const merger = vi.fn().mockResolvedValue(
+      // LLM drops scope/account entirely and emits a wrong project.
+      PAGE(
+        "type: concept\ntitle: Foo\nproject: something-else",
+        "merged body that is long enough to clear the seventy percent threshold",
+      ),
+    )
+    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+    expect(out).toContain("scope: project")
+    expect(out).toContain("project: react-native-receipt-scanner")
+    expect(out).toContain("account: work")
+    expect(out).not.toContain("something-else")
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────
