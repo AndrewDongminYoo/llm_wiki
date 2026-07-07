@@ -236,10 +236,14 @@ function setFrontmatterScalar(
   const newLine = `${fieldName}: ${value}`;
 
   // Only match scalar form (no `[`, no `\n  -`). Array-form fields
-  // are handled by sources-merge.
-  const lineRe = new RegExp(`^${escapedName}:\\s*(?!\\[)([^\\n]*)`, "m");
+  // are handled by sources-merge. Horizontal-whitespace only
+  // (`[^\S\n]*`, not `\s*`) so the match can't span a newline and
+  // swallow the following frontmatter line when the value is empty.
+  const lineRe = new RegExp(`^${escapedName}:[^\\S\\n]*(?!\\[)([^\\n]*)`, "m");
   if (lineRe.test(fmBody)) {
-    const rewritten = fmBody.replace(lineRe, newLine);
+    // Function replacer: the value is inserted literally, so `$1` / `$&`
+    // / `$'` sequences inside it are NOT expanded by String.replace.
+    const rewritten = fmBody.replace(lineRe, () => newLine);
     return `${openDelim}${rewritten}${closeDelim}${content.slice(fmMatch[0].length)}`;
   }
   // Field absent — append.
@@ -287,8 +291,10 @@ function rawScalarValue(
   fieldName: string,
 ): string | null {
   const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Horizontal-whitespace only so an empty field can't swallow the next
+  // line (see setFrontmatterScalar).
   const match = frontmatterBlock.match(
-    new RegExp(`^${escaped}:\\s*(?!\\[)([^\\n]*)`, "m"),
+    new RegExp(`^${escaped}:[^\\S\\n]*(?!\\[)([^\\n]*)`, "m"),
   );
   const raw = match?.[1].trim();
   return raw ? raw : null;

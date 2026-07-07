@@ -265,6 +265,38 @@ describe("mergePageContent — LLM failure fallback", () => {
     expect(out).not.toMatch(/^title: Source: invoice\.pdf$/m);
   });
 
+  it("preserves $ sequences in a locked value (no replacement-string expansion)", async () => {
+    // The locked value is used as a String.replace replacement, where
+    // `$1`/`$&`/`$'` are special. A title containing them must survive.
+    const existing = PAGE(
+      'type: source\ntitle: "Cost: $1 & $& literal"\nsources: ["a.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: source\ntitle: "LLM rewrote this"\nsources: ["b.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM down"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain('title: "Cost: $1 & $& literal"');
+  });
+
+  it("does not let an empty locked field consume the next frontmatter line", async () => {
+    // `\s*` after `field:` would span the newline and pull the following
+    // field's text into the empty one; the match must stay on its line.
+    const existing = PAGE(
+      'type: entity\ncreated:\ntitle: RealTitle\nsources: ["a.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: entity\ntitle: RealTitle\nsources: ["b.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM down"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).not.toContain("created: title:");
+  });
+
   it("rejects LLM output that shrinks body below 70% of max(old, new)", async () => {
     const longBody = "long body content ".repeat(200); // ~3600 chars
     const existing = PAGE("type: entity\ntitle: Foo", longBody);
