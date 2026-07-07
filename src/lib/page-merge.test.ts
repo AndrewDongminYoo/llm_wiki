@@ -246,6 +246,25 @@ describe("mergePageContent — LLM failure fallback", () => {
     expect(out).toContain("account: work");
   });
 
+  it("preserves YAML quoting when locking a title that contains a colon", async () => {
+    // Source pages carry `title: "Source: ..."` (ingest.ts). The colon
+    // makes the value require quotes; writing the parsed value back raw
+    // would emit `title: Source: ...`, which js-yaml rejects — corrupting
+    // frontmatter that was valid on the way in.
+    const existing = PAGE(
+      'type: source\ntitle: "Source: invoice.pdf"\nsources: ["invoice.pdf"]',
+      "old body content",
+    );
+    const incoming = PAGE(
+      'type: source\ntitle: "Source: invoice.pdf"\nsources: ["invoice.pdf"]',
+      "new body content",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("LLM down"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain('title: "Source: invoice.pdf"');
+    expect(out).not.toMatch(/^title: Source: invoice\.pdf$/m);
+  });
+
   it("rejects LLM output that shrinks body below 70% of max(old, new)", async () => {
     const longBody = "long body content ".repeat(200); // ~3600 chars
     const existing = PAGE("type: entity\ntitle: Foo", longBody);

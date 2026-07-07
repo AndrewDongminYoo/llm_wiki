@@ -123,10 +123,7 @@ export async function mergePageContent(
   // array-merged content. EVERY early-return / fallback path below
   // returns this, so a locked facet can never be dropped or rewritten by
   // the incoming frontmatter — not only on the successful LLM merge.
-  const lockedArrayMerged = applyLockedFields(
-    arrayMerged,
-    oldParsed.frontmatter,
-  );
+  const lockedArrayMerged = applyLockedFields(arrayMerged, oldParsed.rawBlock);
 
   // Fast path 3: bodies are identical (only frontmatter array-fields
   // differed). The array merge has already produced the right output;
@@ -180,7 +177,7 @@ export async function mergePageContent(
   // Step 3 — apply deterministic post-processing: lock fields back
   // to existing values, force array fields to the union, set
   // updated to today.
-  let final = applyLockedFields(llmOutput, oldParsed.frontmatter);
+  let final = applyLockedFields(llmOutput, oldParsed.rawBlock);
   // Re-apply union merges on top of the LLM's frontmatter using
   // arrayMerged (which is already existing+incoming union) as the
   // reference. The LLM may have output a subset of array values —
@@ -255,19 +252,44 @@ function setFrontmatterScalar(
  * every non-trivial return path — the successful LLM merge and every
  * fast-path / fallback that returns array-merged content — so a locked
  * facet is never dropped or rewritten by the incoming frontmatter,
- * regardless of which path runs. A field absent from `existingFrontmatter`
- * is left untouched; `setFrontmatterScalar` re-inserts one the LLM dropped.
+ * regardless of which path runs.
+ *
+ * The value is taken as its RAW scalar text (quotes and all), not the
+ * js-yaml-parsed value: source pages carry `title: "Source: ..."`, and
+ * re-emitting the parsed `Source: ...` unquoted would produce invalid
+ * YAML — corrupting frontmatter that was valid on the way in. Preserving
+ * the original text keeps whatever quoting the field already had. A field
+ * absent from the existing frontmatter is left untouched;
+ * `setFrontmatterScalar` re-inserts one the LLM dropped.
  */
 function applyLockedFields(
   content: string,
-  existingFrontmatter: Record<string, unknown> | null | undefined,
+  existingFrontmatterBlock: string,
 ): string {
   let result = content;
   for (const field of LOCKED_FIELDS) {
-    const existingValue = existingFrontmatter?.[field];
-    if (typeof existingValue === "string" && existingValue !== "") {
-      result = setFrontmatterScalar(result, field, existingValue);
+    const rawValue = rawScalarValue(existingFrontmatterBlock, field);
+    if (rawValue) {
+      result = setFrontmatterScalar(result, field, rawValue);
     }
   }
   return result;
+}
+
+/**
+ * Extract the raw (verbatim, still-quoted) scalar text of a frontmatter
+ * field from a frontmatter block. Returns null for an absent field or an
+ * array-form value (`field: [ ... ]`, handled by the union merge instead),
+ * so the original quoting/escaping is preserved on write-back.
+ */
+function rawScalarValue(
+  frontmatterBlock: string,
+  fieldName: string,
+): string | null {
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = frontmatterBlock.match(
+    new RegExp(`^${escaped}:\\s*(?!\\[)([^\\n]*)`, "m"),
+  );
+  const raw = match?.[1].trim();
+  return raw ? raw : null;
 }
