@@ -190,6 +190,51 @@ function normalize(parsed: unknown): Record<string, FrontmatterValue> | null {
   return out
 }
 
+/**
+ * Set a scalar frontmatter field to `value` in the inline form
+ * `field: value`. Replaces the field in place if present, appends
+ * to the end of the frontmatter block if absent. Returns content
+ * unchanged when it has no frontmatter.
+ *
+ * The rewrite consumes both the key line and any trailing indented
+ * continuation lines. Callers always pass a scalar field, but the LLM
+ * sometimes emits one in block form (`scope:\n  - x\n  - y`); replacing
+ * only the key line would leave the list items orphaned and corrupt the
+ * YAML. Inline-array form (`field: [...]`) is skipped via the lookahead
+ * — union array fields are handled by `mergeArrayFieldsIntoContent`.
+ *
+ * The caller is responsible for quoting values that need it; today's
+ * callers pass plain identifiers and ISO dates.
+ */
+export function setFrontmatterScalar(
+  content: string,
+  fieldName: string,
+  value: string,
+): string {
+  const fmMatch = content.match(/^(---\n)([\s\S]*?)(\n---)/)
+  if (!fmMatch) return content
+  const [, openDelim, fmBody, closeDelim] = fmMatch
+  const escapedName = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const newLine = `${fieldName}: ${value}`
+  // Horizontal-whitespace only on the key line (`[^\S\n]*`, not `\s*`)
+  // so an empty inline value can't span the newline and swallow the
+  // following field. Trailing group matches block-form continuation
+  // lines (indented + non-empty) so a stray block-form entry is
+  // replaced wholesale.
+  const lineRe = new RegExp(
+    `^${escapedName}:[^\\S\\n]*(?!\\[)[^\\n]*(?:\\n[^\\S\\n]+\\S[^\\n]*)*`,
+    "m",
+  )
+  if (lineRe.test(fmBody)) {
+    // Function replacer: `$1` / `$&` / `$'` inside `value` are NOT
+    // expanded by String.replace.
+    const rewritten = fmBody.replace(lineRe, () => newLine)
+    return `${openDelim}${rewritten}${closeDelim}${content.slice(fmMatch[0].length)}`
+  }
+  const rewritten = `${fmBody}\n${newLine}`
+  return `${openDelim}${rewritten}${closeDelim}${content.slice(fmMatch[0].length)}`
+}
+
 function stringifyScalar(v: unknown): string {
   if (v === null || v === undefined) return ""
   if (typeof v === "string") return v

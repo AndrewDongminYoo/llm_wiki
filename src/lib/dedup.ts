@@ -28,7 +28,7 @@
  * transforms data.
  */
 
-import { parseFrontmatter } from "./frontmatter"
+import { parseFrontmatter, setFrontmatterScalar } from "./frontmatter"
 import {
   parseFrontmatterArray,
   mergeArrayFieldsIntoContent,
@@ -492,24 +492,6 @@ export function rewriteCrossReferences(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
-
-function setFrontmatterScalar(
-  content: string,
-  field: string,
-  value: string,
-): string {
-  const m = content.match(/^(---\n)([\s\S]*?)(\n---)/)
-  if (!m) return content
-  const [, open, body, close] = m
-  const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const newLine = `${field}: ${value}`
-  const lineRe = new RegExp(`^${escaped}:\\s*(?!\\[)([^\\n]*)`, "m")
-  if (lineRe.test(body)) {
-    const rewritten = body.replace(lineRe, newLine)
-    return `${open}${rewritten}${close}${content.slice(m[0].length)}`
-  }
-  return `${open}${body}\n${newLine}${close}${content.slice(m[0].length)}`
 }
 
 function defaultToday(): string {

@@ -23,7 +23,7 @@
  * the previous (Array-merged-frontmatter + new body) behavior, with
  * an optional backup of the existing content for user recovery.
  */
-import { parseFrontmatter } from "./frontmatter";
+import { parseFrontmatter, setFrontmatterScalar } from "./frontmatter";
 import { mergeArrayFieldsIntoContent } from "./sources-merge";
 
 /** Frontmatter array fields unioned across re-ingests. */
@@ -207,58 +207,6 @@ async function tryBackup(
 
 function defaultToday(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-/**
- * Set a scalar frontmatter field to `value` in the inline form
- * `field: value`. If the field already exists in the frontmatter,
- * the line is replaced in place. If it doesn't, the field is
- * appended at the end of the frontmatter block.
- *
- * Keeps the rest of the document unchanged. Returns content
- * unchanged if it has no frontmatter at all.
- *
- * Quoting: the value is written verbatim; the caller is
- * responsible for quoting if the value contains characters that
- * would otherwise break YAML parsing (`:` etc). Today's callers
- * pass plain identifiers and ISO dates so this hasn't been an
- * issue.
- */
-function setFrontmatterScalar(
-  content: string,
-  fieldName: string,
-  value: string,
-): string {
-  const fmMatch = content.match(/^(---\n)([\s\S]*?)(\n---)/);
-  if (!fmMatch) return content;
-  const [, openDelim, fmBody, closeDelim] = fmMatch;
-  const escapedName = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const newLine = `${fieldName}: ${value}`;
-
-  // Match the field's entire existing entry so it's fully replaced by
-  // the scalar. Inline array form (`[`) is skipped via the lookahead —
-  // union array fields are handled by sources-merge, not here. Every
-  // caller of this function passes a scalar field, so if the existing
-  // entry is in block form (`scope:` + indented `- item` lines) it's a
-  // malformation to overwrite wholesale: the trailing `(?:\n ...)*`
-  // consumes the indented continuation lines too, otherwise the rewrite
-  // would replace only the `key:` line and leave orphaned list items
-  // behind (corrupt YAML). Horizontal-whitespace only (`[^\S\n]*`, not
-  // `\s*`) on the key line so an empty inline value can't span a newline
-  // and swallow the following frontmatter line.
-  const lineRe = new RegExp(
-    `^${escapedName}:[^\\S\\n]*(?!\\[)[^\\n]*(?:\\n[^\\S\\n]+\\S[^\\n]*)*`,
-    "m",
-  );
-  if (lineRe.test(fmBody)) {
-    // Function replacer: the value is inserted literally, so `$1` / `$&`
-    // / `$'` sequences inside it are NOT expanded by String.replace.
-    const rewritten = fmBody.replace(lineRe, () => newLine);
-    return `${openDelim}${rewritten}${closeDelim}${content.slice(fmMatch[0].length)}`;
-  }
-  // Field absent — append.
-  const rewritten = `${fmBody}\n${newLine}`;
-  return `${openDelim}${rewritten}${closeDelim}${content.slice(fmMatch[0].length)}`;
 }
 
 /**
