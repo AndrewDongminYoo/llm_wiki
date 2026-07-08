@@ -125,6 +125,29 @@ export async function mergePageContent(
   // the incoming frontmatter — not only on the successful LLM merge.
   const lockedArrayMerged = applyLockedFields(arrayMerged, oldParsed.rawBlock);
 
+  // Fallback content for every LLM-failure / sanity-rejection path below.
+  // `lockedArrayMerged` carries the INCOMING body, so if a re-ingest
+  // regenerates a page from fewer sources (a legitimately short body) and the
+  // merge then fails or is rejected, returning it would clobber the richer
+  // existing body — accumulated, curated content — with the sparse new one.
+  // When the existing body is longer, preserve it and union the new array
+  // fields into it instead; refresh `updated` since the page still changed.
+  const oldBodyLen = oldParsed.body.length;
+  const newBodyLen = arrayMergedParsed.body.length;
+  const fallbackContent =
+    oldBodyLen > newBodyLen
+      ? setFrontmatterScalar(
+          applyLockedFields(
+            mergeArrayFieldsIntoContent(existingContent, newContent, [
+              ...UNION_FIELDS,
+            ]),
+            oldParsed.rawBlock,
+          ),
+          "updated",
+          (opts.today ?? defaultToday)(),
+        )
+      : lockedArrayMerged;
+
   // Fast path 3: bodies are identical (only frontmatter array-fields
   // differed). The array merge has already produced the right output;
   // skip the LLM.
@@ -147,7 +170,7 @@ export async function mergePageContent(
       `[page-merge] LLM merge failed for ${opts.pagePath}, falling back to incoming + array-field union: ${err instanceof Error ? err.message : err}`,
     );
     await tryBackup(opts, existingContent);
-    return lockedArrayMerged;
+    return fallbackContent;
   }
 
   // Sanity 1: LLM output must parse as a frontmatter-bearing wiki
@@ -158,12 +181,10 @@ export async function mergePageContent(
       `[page-merge] LLM output for ${opts.pagePath} has no frontmatter — rejecting, falling back`,
     );
     await tryBackup(opts, existingContent);
-    return lockedArrayMerged;
+    return fallbackContent;
   }
 
   // Sanity 2: body length. Reject obvious truncation / lazy summary.
-  const oldBodyLen = oldParsed.body.length;
-  const newBodyLen = arrayMergedParsed.body.length;
   const llmBodyLen = llmParsed.body.length;
   const minThreshold = Math.max(oldBodyLen, newBodyLen) * BODY_SHRINK_THRESHOLD;
   if (llmBodyLen < minThreshold) {
@@ -171,7 +192,7 @@ export async function mergePageContent(
       `[page-merge] LLM merge for ${opts.pagePath} produced body ${llmBodyLen} chars, below threshold ${minThreshold.toFixed(0)} (max input was ${Math.max(oldBodyLen, newBodyLen)}) — rejecting, falling back`,
     );
     await tryBackup(opts, existingContent);
-    return lockedArrayMerged;
+    return fallbackContent;
   }
 
   // Step 3 — apply deterministic post-processing: lock fields back
