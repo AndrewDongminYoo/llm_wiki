@@ -250,6 +250,66 @@ describe("mergePageContent — LLM failure fallback", () => {
     expect(out).toContain("new body content");
   });
 
+  it("preserves the richer existing body when the merge is rejected as too short", async () => {
+    // A single-source re-ingest legitimately produces a short body; the merge
+    // shrink-guard then rejects the LLM output. The fallback must keep the
+    // existing rich body, not clobber it with the sparse incoming one.
+    const richBody = "## Details\n\n" + "curated existing content. ".repeat(60);
+    const existing = PAGE(
+      'type: entity\ntitle: Foo\ntags: [old]\nsources: ["a.pdf"]',
+      richBody,
+    );
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\ntags: [new]\nsources: ["b.pdf"]',
+      "tiny regenerated body",
+    );
+    const merger = vi
+      .fn()
+      .mockResolvedValue(
+        PAGE("type: entity\ntitle: Foo", "also a tiny merged body"),
+      );
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("curated existing content"); // rich body kept
+    expect(out).not.toContain("tiny regenerated body");
+    // Arrays still unioned (order is not significant across fallback paths).
+    expect(out).toMatch(/tags:\s*\[[^\]]*"old"[^\]]*\]/);
+    expect(out).toMatch(/tags:\s*\[[^\]]*"new"[^\]]*\]/);
+    expect(out).toContain("updated: 2026-04-30"); // refreshed
+  });
+
+  it("preserves the richer existing body when the LLM merge throws", async () => {
+    const richBody = "existing prose paragraph. ".repeat(60);
+    const existing = PAGE(
+      'type: entity\ntitle: Foo\nsources: ["a.pdf"]',
+      richBody,
+    );
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\nsources: ["b.pdf"]',
+      "short new stub",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("boom"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out).toContain("existing prose paragraph");
+    expect(out).not.toContain("short new stub");
+  });
+
+  it("keeps valid frontmatter when the existing page has none (legacy file)", async () => {
+    // A legacy/manual on-disk page: long body, but no parseable frontmatter.
+    // A merge failure must not write a frontmatter-less page — the body-
+    // preserve path is gated off, so it falls back to the incoming (valid)
+    // frontmatter rather than the bare existing content.
+    const existing = "# Legacy\n\n" + "hand-written content. ".repeat(50);
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\nsources: ["b.pdf"]',
+      "short regen",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("boom"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out.startsWith("---")).toBe(true); // has frontmatter
+    expect(out).toContain("type: entity"); // the incoming valid frontmatter
+    expect(out).toContain("title: Foo");
+  });
+
   it("preserves locked scope/project/account on the LLM-failure fallback", async () => {
     // The fallback returns array-merged content that starts from the
     // incoming (LLM) frontmatter. Locked facets must still be forced
