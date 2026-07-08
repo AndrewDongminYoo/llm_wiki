@@ -293,6 +293,23 @@ describe("mergePageContent — LLM failure fallback", () => {
     expect(out).not.toContain("short new stub");
   });
 
+  it("keeps valid frontmatter when the existing page has none (legacy file)", async () => {
+    // A legacy/manual on-disk page: long body, but no parseable frontmatter.
+    // A merge failure must not write a frontmatter-less page — the body-
+    // preserve path is gated off, so it falls back to the incoming (valid)
+    // frontmatter rather than the bare existing content.
+    const existing = "# Legacy\n\n" + "hand-written content. ".repeat(50);
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\nsources: ["b.pdf"]',
+      "short regen",
+    );
+    const merger = vi.fn().mockRejectedValue(new Error("boom"));
+    const out = await mergePageContent(incoming, existing, merger, baseOpts);
+    expect(out.startsWith("---")).toBe(true); // has frontmatter
+    expect(out).toContain("type: entity"); // the incoming valid frontmatter
+    expect(out).toContain("title: Foo");
+  });
+
   it("preserves locked scope/project/account on the LLM-failure fallback", async () => {
     // The fallback returns array-merged content that starts from the
     // incoming (LLM) frontmatter. Locked facets must still be forced

@@ -131,13 +131,17 @@ export async function mergePageContent(
   // merge then fails or is rejected, returning it would clobber the richer
   // existing body — accumulated, curated content — with the sparse new one.
   // When the existing body is longer, preserve it and union the new array
-  // fields into it instead of taking the incoming body. Either way the page
-  // changed (array-field union at minimum), so refresh `updated` on both
-  // branches for consistent semantics.
+  // fields into it instead of taking the incoming body. This path is gated on
+  // the existing page having parseable frontmatter: a legacy/manual file with
+  // no frontmatter would otherwise produce a frontmatter-less page (neither
+  // the array merge nor setFrontmatterScalar can manufacture one), discarding
+  // the valid frontmatter the incoming page carried — so those fall through to
+  // `lockedArrayMerged`. Either way the page changed (array-field union at
+  // minimum), so refresh `updated` on both branches for consistent semantics.
   const oldBodyLen = oldParsed.body.length;
   const newBodyLen = arrayMergedParsed.body.length;
   const fallbackContent = setFrontmatterScalar(
-    oldBodyLen > newBodyLen
+    oldParsed.frontmatter !== null && oldBodyLen > newBodyLen
       ? applyLockedFields(
           mergeArrayFieldsIntoContent(existingContent, newContent, [
             ...UNION_FIELDS,
