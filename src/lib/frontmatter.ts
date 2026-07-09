@@ -1,4 +1,4 @@
-import yaml from "js-yaml"
+import { JSON_SCHEMA, load } from "js-yaml"
 
 export type FrontmatterValue = string | string[]
 
@@ -48,10 +48,10 @@ export function parseFrontmatter(content: string): FrontmatterParseResult {
   // beyond that is reported as no-frontmatter.
   let parsed: unknown
   try {
-    parsed = yaml.load(yamlPayload, { schema: yaml.JSON_SCHEMA })
+    parsed = load(yamlPayload, { schema: JSON_SCHEMA })
   } catch {
     try {
-      parsed = yaml.load(repairWikilinkLists(yamlPayload), { schema: yaml.JSON_SCHEMA })
+      parsed = load(repairWikilinkLists(yamlPayload), { schema: JSON_SCHEMA })
     } catch {
       return { frontmatter: null, body, rawBlock }
     }
@@ -157,7 +157,9 @@ function repairWikilinkLists(payload: string): string {
   return payload
     .split("\n")
     .map((line) => {
-      const m = line.match(/^(\s*[A-Za-z_][\w-]*\s*:\s*)(\[\[[^\]]+\]\](?:\s*,\s*\[\[[^\]]+\]\])+)\s*$/)
+      const m = line.match(
+        /^(\s*[A-Za-z_][\w-]*\s*:\s*)(\[\[[^\]]+\]\](?:\s*,\s*\[\[[^\]]+\]\])+)\s*$/,
+      )
       if (!m) return line
       const prefix = m[1]
       const items = m[2]
@@ -178,9 +180,12 @@ function repairWikilinkLists(payload: string): string {
  * still surfaces in the UI rather than silently disappearing.
  */
 function normalize(parsed: unknown): Record<string, FrontmatterValue> | null {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return null
   const out: Record<string, FrontmatterValue> = {}
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(
+    parsed as Record<string, unknown>,
+  )) {
     if (Array.isArray(value)) {
       out[key] = value.map((v) => stringifyScalar(v))
       continue

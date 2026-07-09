@@ -1,4 +1,4 @@
-import yaml from "js-yaml"
+import { dump, JSON_SCHEMA, load } from "js-yaml"
 
 /**
  * Clean up an LLM-generated wiki page body before it hits disk.
@@ -210,13 +210,14 @@ function normalizeBlockScalarsInFrontmatter(content: string): string {
 
   let parsed: unknown
   try {
-    parsed = yaml.load(payload, { schema: yaml.JSON_SCHEMA })
+    parsed = load(payload, { schema: JSON_SCHEMA })
   } catch {
     // Malformed YAML — leave it for the existing repair steps.
     return content
   }
 
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return content
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return content
 
   // Collapse embedded newlines in scalar values so yaml.dump never
   // re-introduces block scalars (which only appear when values contain \n).
@@ -235,9 +236,10 @@ function normalizeBlockScalarsInFrontmatter(content: string): string {
 
   // Re-serialise. lineWidth: -1 disables line folding so long strings
   // stay on one line instead of becoming block scalars.
-  const newPayload = yaml
-    .dump(normalized, { lineWidth: -1, noRefs: true })
-    .trimEnd() // yaml.dump always appends a trailing \n
+  const newPayload = dump(normalized, {
+    lineWidth: -1,
+    noRefs: true,
+  }).trimEnd() // yaml.dump always appends a trailing \n
 
   // Reconstruct: prefix up to and including "---\n", new payload,
   // then the original "\n---..." suffix.
