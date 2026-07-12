@@ -96,6 +96,11 @@ export interface MergePageOptions {
   /** Date provider for the `updated` field. Injectable for
    *  deterministic tests. Defaults to today's UTC date. */
   today?: () => string;
+  /**
+   * Replace the old body after a corrected source is regenerated, while
+   * retaining union fields, locked metadata, and a recovery backup.
+   */
+  replaceExistingBody?: boolean;
 }
 
 export async function mergePageContent(
@@ -152,6 +157,19 @@ export async function mergePageContent(
     "updated",
     (opts.today ?? defaultToday)(),
   );
+
+  // Corrected-source path: a regenerated source must replace the old body
+  // wholesale (array fields already unioned into `arrayMerged`) instead of
+  // merging the stale body back in — but keep locked scalars and back up the
+  // old content first. `oldParsed`/`arrayMergedParsed` are already parsed above.
+  if (opts.replaceExistingBody) {
+    await tryBackup(opts, existingContent);
+    return setFrontmatterScalar(
+      applyLockedFields(arrayMerged, oldParsed.rawBlock),
+      "updated",
+      (opts.today ?? defaultToday)(),
+    );
+  }
 
   // Fast path 3: bodies are identical (only frontmatter array-fields
   // differed). The array merge has already produced the right output;

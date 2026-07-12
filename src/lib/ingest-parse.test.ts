@@ -27,6 +27,7 @@ import {
   aggregatePathsNeedingRepair,
   filterAggregateRepairOutput,
   rewriteIngestPathFromTitleForTargetLanguage,
+  canonicalizeSourcesField,
 } from "./ingest"
 
 // ── Happy paths ─────────────────────────────────────────────────────
@@ -615,5 +616,32 @@ describe("rewriteIngestPathFromTitleForTargetLanguage", () => {
     expect(
       rewriteIngestPathFromTitleForTargetLanguage("wiki/index.md", content, "Chinese"),
     ).toBe("wiki/index.md")
+  })
+})
+
+describe("canonicalizeSourcesField", () => {
+  it("removes generated and unsafe paths while preserving raw source identities", () => {
+    const content = [
+      "---",
+      "title: Entity",
+      'sources: ["wiki/log.md", "wiki/index.md", ".llm-wiki/state.json", "/tmp/secret.md", "../escape.md", "raw/sources/folder/source.md"]',
+      "---",
+      "# Entity",
+    ].join("\n")
+
+    const result = canonicalizeSourcesField(content, "folder/source.md")
+
+    expect(result).toContain('sources: ["folder/source.md"]')
+    expect(result).not.toContain("wiki/log.md")
+    expect(result).not.toContain(".llm-wiki")
+    expect(result).not.toContain("/tmp/secret.md")
+    expect(result).not.toContain("../escape.md")
+  })
+
+  it("preserves a legitimate source identity under a wiki-named raw subfolder", () => {
+    const content = '---\ntitle: Notes\nsources: ["raw/sources/wiki/notes.md"]\n---\n# Notes'
+    expect(canonicalizeSourcesField(content, "wiki/notes.md")).toContain(
+      'sources: ["wiki/notes.md"]',
+    )
   })
 })

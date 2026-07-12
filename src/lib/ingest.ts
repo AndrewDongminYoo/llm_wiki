@@ -19,6 +19,7 @@ import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import {
   sourceIdentityForPath,
+  sourceReferenceIdentity,
   sourceSummarySlugCandidatesFromIdentity,
   sourceSummarySlugFromIdentity,
 } from "@/lib/source-identity"
@@ -1210,22 +1211,7 @@ async function autoIngestImpl(
   // task for retry rather than "success".
   if (!hasSourceSummary && !signal?.aborted) {
     const date = new Date().toISOString().slice(0, 10)
-    const fallbackContent = [
-      "---",
-      `type: source`,
-      `title: "Source: ${sourceIdentity}"`,
-      `created: ${date}`,
-      `updated: ${date}`,
-      `sources: ["${sourceIdentity}"]`,
-      `tags: []`,
-      `related: []`,
-      "---",
-      "",
-      `# Source: ${sourceIdentity}`,
-      "",
-      analysis ? analysis.slice(0, 3000) : "(Analysis not available)",
-      "",
-    ].join("\n")
+    const fallbackContent = buildFallbackSourceSummary(sourceIdentity, analysis, date)
     try {
       await writeFile(sourceSummaryFullPath, fallbackContent)
       writtenPaths.push(sourceSummaryPath)
@@ -1391,8 +1377,26 @@ function isLogPath(relativePath: string): boolean {
   return relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")
 }
 
-function isIndexPath(relativePath: string): boolean {
-  return relativePath === "wiki/index.md" || relativePath.endsWith("/index.md")
+// NOTE: overview.md is treated as a listing page (isListingPath) and is written
+// by the LLM under HEAD's architecture; only index.md + log.md are dropped.
+
+/**
+ * App-owned aggregate files the system generates deterministically — index.md
+ * (via generateIndexMd) and log.md (appended by regenerateAggregateFiles) — and
+ * that the LLM must never write directly. Case- and separator-insensitive so a
+ * generated `wiki\LOG.md` / `wiki/INDEX.md` variant can't evade the drop and,
+ * on a case-insensitive filesystem, collide with the real append-only log or
+ * index. overview.md is intentionally excluded: HEAD's architecture has the LLM
+ * generate it (see AGGREGATE_WIKI_PATHS / the aggregate-repair pass).
+ */
+function isSystemOwnedAggregatePath(relativePath: string): boolean {
+  const normalized = relativePath.replace(/\\/g, "/").toLowerCase()
+  return (
+    normalized === "wiki/index.md" ||
+    normalized.endsWith("/index.md") ||
+    normalized === "wiki/log.md" ||
+    normalized.endsWith("/log.md")
+  )
 }
 
 function isListingPath(relativePath: string): boolean {
@@ -1492,18 +1496,32 @@ function isAggregateRepairSafe(
   return true
 }
 
-function canonicalizeSourcesField(content: string, sourceIdentity: string): string {
+function isValidSourceReference(source: string, activeSourceIdentity: string): boolean {
+  const normalized = normalizePath(source).replace(/^(?:\.\/)+/, "")
+  const key = normalized.toLowerCase()
+  const identityKey = normalizePath(activeSourceIdentity).toLowerCase()
+  if (!normalized || normalized.startsWith("/") || /^[a-z]:\//i.test(normalized)) return false
+  if (normalized.split("/").some((part) => part === "..")) return false
+  if (sourceReferenceIdentity(normalized).toLowerCase() === identityKey) return true
+  if (["wiki/index.md", "wiki/overview.md", "wiki/log.md"].includes(key)) return false
+  if (key === ".llm-wiki" || key.startsWith(".llm-wiki/")) return false
+  return true
+}
+
+export function canonicalizeSourcesField(content: string, sourceIdentity: string): string {
   if (!/^---\n/.test(content)) return content
 
   const identityKey = normalizePath(sourceIdentity).toLowerCase()
   const identityBaseName = getFileName(sourceIdentity).toLowerCase()
   const sourceValues = parseSources(content)
-  const canonicalValues = sourceValues.map((source) => {
-    const normalized = normalizePath(source)
+  const canonicalValues = sourceValues.filter((source) =>
+    isValidSourceReference(source, sourceIdentity)
+  ).map((source) => {
+    const normalized = sourceReferenceIdentity(source)
     const key = normalized.toLowerCase()
     if (key === identityKey) return sourceIdentity
     if (!normalized.includes("/") && key === identityBaseName) return sourceIdentity
-    return source
+    return normalized
   })
   if (!canonicalValues.some((source) => normalizePath(source).toLowerCase() === identityKey)) {
     canonicalValues.push(sourceIdentity)
@@ -1678,6 +1696,32 @@ export function currentWikiDate(now: Date = new Date()): string {
   return `${year}-${month}-${day}`
 }
 
+export function buildFallbackSourceSummary(
+  sourceIdentity: string,
+  analysis: string,
+  date: string,
+): string {
+  return [
+    "---",
+    "type: source",
+    `title: "Source: ${sourceIdentity}"`,
+    `created: ${date}`,
+    `updated: ${date}`,
+    `sources: ["${sourceIdentity}"]`,
+    "tags: []",
+    "related: []",
+    "---",
+    "",
+    `# Source: ${sourceIdentity}`,
+    "",
+    // This is a recovery page, so preserving the complete analysis matters
+    // more than keeping the page short. Truncating here used to create
+    // syntactically valid but silently incomplete source summaries.
+    analysis || "(Analysis not available)",
+    "",
+  ].join("\n")
+}
+
 export function stampGeneratedFrontmatterDates(content: string, date: string): string {
   const fmRe = /^(---\s*\r?\n)([\s\S]*?)(\r?\n---\s*(?:\r?\n|$))/
   const match = content.match(fmRe)
@@ -1730,13 +1774,12 @@ async function writeFileBlocks(
     if (sourceSummaryPath && relativePath.startsWith("wiki/sources/")) {
       relativePath = sourceSummaryPath
     }
-
     // index.md and log.md are generated deterministically after all
     // content pages land (see regenerateAggregateFiles). Drop any
     // blocks the model emitted for them — this is what stops the LLM
     // from clobbering the index (dropping existing entries) or
     // duplicating the entire log on every wave.
-    if (isIndexPath(relativePath) || isLogPath(relativePath)) {
+    if (isSystemOwnedAggregatePath(relativePath)) {
       warnings.push(
         `Dropped LLM-emitted "${relativePath}" — generated deterministically by the system.`,
       )
@@ -1832,7 +1875,14 @@ async function writeFileBlocks(
         // body + array-field union" with a best-effort backup.
         // See page-merge.ts.
         const existing = await tryReadFile(fullPath)
-        const toWrite = await mergePageContent(
+        // Re-ingesting a corrected source must replace pages owned solely by
+        // that source. Merging the old body back into the new generation kept
+        // retracted wording alive indefinitely. Multi-source pages still use
+        // the merger because their other sources' contributions must survive.
+        const replaceExistingBody = Boolean(
+          existing && isOwnedOnlyBySource(existing, sourceFileName),
+        )
+        const merged = await mergePageContent(
           content,
           existing || null,
           buildPageMerger(llmConfig),
@@ -1841,8 +1891,12 @@ async function writeFileBlocks(
             pagePath: relativePath,
             signal,
             backup: (oldContent) => backupExistingPage(projectPath, relativePath, oldContent),
+            replaceExistingBody,
           },
         )
+        // The merge unions existing frontmatter arrays, so sanitize again to
+        // remove legacy/generated paths that may already be stored on disk.
+        const toWrite = canonicalizeSourcesField(merged, sourceFileName)
         await writeFile(fullPath, toWrite)
       }
       writtenPaths.push(relativePath)
@@ -1936,6 +1990,15 @@ async function regenerateAggregateFiles(
   }
 
   return warnings
+}
+
+function isOwnedOnlyBySource(content: string, sourceIdentity: string): boolean {
+  const sources = parseSources(content)
+  if (sources.length === 0) return false
+  const expected = sourceReferenceIdentity(sourceIdentity).toLowerCase()
+  return sources.every(
+    (source) => sourceReferenceIdentity(source).toLowerCase() === expected,
+  )
 }
 
 const REVIEW_BLOCK_REGEX = /---REVIEW:\s*(\w[\w-]*)\s*\|\s*(.+?)\s*---\n([\s\S]*?)---END REVIEW---/g
@@ -3138,7 +3201,19 @@ export async function startIngest(
   )
 }
 
-export async function executeIngestWrites(
+export function executeIngestWrites(
+  projectPath: string,
+  llmConfig: LlmConfig,
+  userGuidance?: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const pp = normalizePath(projectPath)
+  return withProjectLock(pp, () =>
+    executeIngestWritesImpl(pp, llmConfig, userGuidance, signal)
+  )
+}
+
+async function executeIngestWritesImpl(
   projectPath: string,
   llmConfig: LlmConfig,
   userGuidance?: string,
@@ -3254,9 +3329,18 @@ export async function executeIngestWrites(
       relativePath = activeSourceSummaryPath
     }
 
+    // Reject path-traversal / unsafe destinations before writing raw model
+    // output to disk (upstream v0.6.3 hardening).
+    if (!isSafeIngestPath(relativePath)) {
+      console.warn(`[executeIngestWrites] rejected unsafe path: ${relativePath}`)
+      continue
+    }
+
     // index.md / log.md are generated deterministically after the loop;
-    // drop any blocks the model emitted for them.
-    if (isIndexPath(relativePath) || isLogPath(relativePath)) {
+    // drop any blocks the model emitted for them (case/separator-insensitive
+    // so a `wiki/LOG.md` variant can't collide with the real log on a
+    // case-insensitive filesystem).
+    if (isSystemOwnedAggregatePath(relativePath)) {
       continue
     }
 
