@@ -224,6 +224,44 @@ describe("autoIngest source summary paths", () => {
     expect(content).toContain("-end")
   })
 
+  it("drops path-traversal and non-wiki FILE blocks from the autoIngest generation", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    // The model controls the FILE paths, so a `../` traversal or an outside-wiki
+    // target must never reach writeFile — every generated file stays under wiki/.
+    generationSuffix = [
+      "",
+      "---FILE: ../escape.md---",
+      "# hostile escape",
+      "---END FILE---",
+      "",
+      "---FILE: raw/leaked.md---",
+      "# outside wiki/",
+      "---END FILE---",
+    ].join("\n")
+
+    try {
+      const written = await autoIngest(
+        tmp.path,
+        `${tmp.path}/raw/sources/project-a/config.yaml`,
+        useWikiStore.getState().llmConfig,
+        undefined,
+        "project-a",
+      )
+
+      // Neither hostile block is written, but the legit source summary still lands.
+      expect(written.some((p) => /escape\.md$/.test(p))).toBe(false)
+      expect(written.some((p) => /leaked\.md$/.test(p))).toBe(false)
+      expect(written.some((p) => p.includes("wiki/sources/"))).toBe(true)
+      await expect(fs.access(path.join(tmp.path, "raw", "leaked.md"))).rejects.toThrow()
+      await expect(fs.access(path.join(tmp.path, "..", "escape.md"))).rejects.toThrow()
+    } finally {
+      // Defensive: if the guard were absent, the traversal write would land in
+      // the temp parent — never leave it behind for other tests.
+      await fs.rm(path.join(tmp.path, "..", "escape.md"), { force: true }).catch(() => {})
+    }
+  })
+
   it("keeps distinct source summaries for same-basename files in different source subdirectories", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config", "project-b config"]
