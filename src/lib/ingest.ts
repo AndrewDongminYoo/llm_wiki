@@ -1957,7 +1957,14 @@ async function regenerateAggregateFiles(
   const wikiRoot = `${pp}/wiki`
 
   // index.md — read all pages, regenerate from frontmatter, write.
+  // The rewrite is wholesale, so carry the existing `created` forward;
+  // otherwise it would be restamped to `date` on every ingest.
   try {
+    const indexPath = `${wikiRoot}/index.md`
+    const existingIndex = await tryReadFile(indexPath)
+    const existingCreated = existingIndex
+      ? parseFrontmatter(existingIndex).frontmatter?.created
+      : undefined
     const tree = await listDirectory(wikiRoot)
     const mdNodes = collectMdNodes(tree)
     const pages: IndexInputPage[] = []
@@ -1969,8 +1976,11 @@ async function regenerateAggregateFiles(
       const content = await tryReadFile(node.path)
       if (content) pages.push({ relativePath, content })
     }
-    const indexContent = generateIndexMd(pages, { date })
-    await writeFile(`${wikiRoot}/index.md`, indexContent)
+    const indexContent = generateIndexMd(pages, {
+      date,
+      created: typeof existingCreated === "string" ? existingCreated : undefined,
+    })
+    await writeFile(indexPath, indexContent)
   } catch (err) {
     warnings.push(
       `index.md regeneration failed: ${err instanceof Error ? err.message : String(err)}`,
