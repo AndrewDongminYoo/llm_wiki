@@ -28,6 +28,7 @@ import {
   filterAggregateRepairOutput,
   rewriteIngestPathFromTitleForTargetLanguage,
   canonicalizeSourcesField,
+  filterTruncatedFileRepairOutput,
 } from "./ingest"
 
 // ── Happy paths ─────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ describe("parseFileBlocks — H2: truncated streams (surface, don't hide)", () =
       "---FILE: wiki/concepts/moe.md---",
       "# Mixture of Exp", // stream cut here
     ].join("\n")
-    const { blocks, warnings } = parseFileBlocks(text)
+    const { blocks, warnings, truncatedPaths } = parseFileBlocks(text)
     // Completed block makes it through.
     expect(blocks).toHaveLength(1)
     expect(blocks[0].path).toBe("wiki/entities/qwen.md")
@@ -201,6 +202,7 @@ describe("parseFileBlocks — H2: truncated streams (surface, don't hide)", () =
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/wiki\/concepts\/moe\.md/)
     expect(warnings[0]).toMatch(/not closed/i)
+    expect(truncatedPaths).toEqual(["wiki/concepts/moe.md"])
   })
 
   it("warns when the only block is unclosed", () => {
@@ -209,6 +211,34 @@ describe("parseFileBlocks — H2: truncated streams (surface, don't hide)", () =
     expect(blocks).toHaveLength(0)
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/rope\.md/)
+  })
+})
+
+describe("filterTruncatedFileRepairOutput", () => {
+  it("keeps one requested block and drops duplicate and unrequested blocks", () => {
+    const requested = "wiki/concepts/recovered.md"
+    const result = filterTruncatedFileRepairOutput([
+      `---FILE: ${requested}---`,
+      "# First complete repair",
+      "---END FILE---",
+      `---FILE: ${requested}---`,
+      "# Duplicate repair",
+      "---END FILE---",
+      "---FILE: wiki/concepts/unrequested.md---",
+      "# Unrequested",
+      "---END FILE---",
+    ].join("\n"), [requested])
+
+    expect(result.paths).toEqual([requested])
+    expect(result.text).toContain("# First complete repair")
+    expect(result.text).not.toContain("# Duplicate repair")
+    expect(result.text).not.toContain("# Unrequested")
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/duplicate FILE block/),
+        expect.stringMatching(/unrequested FILE block/),
+      ]),
+    )
   })
 })
 
