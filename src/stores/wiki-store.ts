@@ -45,6 +45,10 @@ interface LlmConfig {
   codexCliTimeoutMinutes?: number
   /** HTTP LLM request backstop. Defaults to 30 minutes for legacy configs. */
   requestTimeoutMinutes?: number
+  /** Defaults to true. HTTP providers use a non-streaming wire when false. */
+  streamingEnabled?: boolean
+  /** Optional headers added to every HTTP request for this provider preset. */
+  customHeaders?: Record<string, string>
 }
 
 export type SearchProvider =
@@ -53,6 +57,7 @@ export type SearchProvider =
   | "searxng"
   | "ollama"
   | "brave"
+  | "bocha"
   | "firecrawl"
   | "none"
 export type DeepResearchSource = "web" | "anytxt" | "both"
@@ -133,6 +138,10 @@ interface EmbeddingConfig {
    */
   maxChunkChars?: number
   overlapChunkChars?: number
+  /** Maximum embedding HTTP requests in flight. Defaults to 1 for compatibility. */
+  concurrency?: number
+  /** Texts per OpenAI-compatible embedding request. Defaults to 1. */
+  batchSize?: number
   /**
    * Extra HTTP headers to send with every embedding request, e.g.
    *   { "X-Model-Provider-Id": "siliconflow" }
@@ -319,9 +328,37 @@ export interface ProviderOverride {
   localCliIsolation?: boolean
   codexCliTimeoutMinutes?: number
   requestTimeoutMinutes?: number
+  streamingEnabled?: boolean
+  customHeaders?: Record<string, string>
 }
 
 export type ProviderConfigs = Record<string, ProviderOverride>
+
+export interface CustomLlmPreset {
+  id: string
+  label: string
+}
+
+export interface TaskModelRoutingConfig {
+  /** Null keeps chat on the globally active provider preset. */
+  chatPresetId: string | null
+  /** Null keeps ingest on the globally active provider preset. */
+  ingestPresetId: string | null
+}
+
+export interface ProjectLlmOverride {
+  enabled: boolean
+  presetId: string | null
+  /** Empty uses the selected preset/global provider model. */
+  model: string
+  /**
+   * Resolved provider metadata for native/API callers. The API key is
+   * deliberately omitted: Rust merges the current credential from
+   * providerConfigs[presetId], so rotating a key never requires rewriting
+   * every project override and credentials are not duplicated per project.
+   */
+  profile?: Omit<LlmConfig, "apiKey" | "customHeaders">
+}
 
 export interface ExternalPreview {
   title: string
@@ -368,10 +405,15 @@ interface WikiState {
   pendingScrollImageSrc: string | null
   activeView: "chat" | "wiki" | "sources" | "search" | "graph" | "lint" | "review" | "skills" | "settings"
   llmConfig: LlmConfig
+  /** Persisted global/default config, kept separate while a project override is effective. */
+  globalLlmConfig: LlmConfig
   /** Per-provider-preset stored overrides (API key, model, endpoint, …). */
   providerConfigs: ProviderConfigs
+  customLlmPresets: CustomLlmPreset[]
   /** Which preset is currently active. `null` = no LLM configured. */
   activePresetId: string | null
+  taskModelRouting: TaskModelRoutingConfig
+  projectLlmOverride: ProjectLlmOverride
   searchApiConfig: SearchApiConfig
   embeddingConfig: EmbeddingConfig
   multimodalConfig: MultimodalConfig
@@ -397,8 +439,12 @@ interface WikiState {
   setPendingScrollImageSrc: (src: string | null) => void
   setActiveView: (view: WikiState["activeView"]) => void
   setLlmConfig: (config: LlmConfig) => void
+  setGlobalLlmConfig: (config: LlmConfig) => void
   setProviderConfigs: (configs: ProviderConfigs) => void
+  setCustomLlmPresets: (presets: CustomLlmPreset[]) => void
   setActivePresetId: (id: string | null) => void
+  setTaskModelRouting: (config: TaskModelRoutingConfig) => void
+  setProjectLlmOverride: (config: ProjectLlmOverride) => void
   setSearchApiConfig: (config: SearchApiConfig) => void
   setEmbeddingConfig: (config: EmbeddingConfig) => void
   setMultimodalConfig: (config: MultimodalConfig) => void
@@ -436,8 +482,30 @@ export const useWikiStore = create<WikiState>((set) => ({
     reasoning: { mode: "auto" },
     localCliIsolation: false,
   },
+  globalLlmConfig: {
+    provider: "openai",
+    apiKey: "",
+    maxContextSize: 204800,
+    model: "",
+    ollamaUrl: "http://localhost:11434",
+    customEndpoint: "",
+    azureApiVersion: "2024-10-21",
+    reasoning: { mode: "auto" },
+    localCliIsolation: false,
+  },
   providerConfigs: {},
+  customLlmPresets: [],
   activePresetId: null,
+  taskModelRouting: {
+    chatPresetId: null,
+    ingestPresetId: null,
+  },
+  projectLlmOverride: {
+    enabled: false,
+    presetId: null,
+    model: "",
+    profile: undefined,
+  },
 
   dataVersion: 0,
 
@@ -580,8 +648,12 @@ export const useWikiStore = create<WikiState>((set) => ({
   graphUiState: createDefaultGraphUiState(),
 
   setLlmConfig: (llmConfig) => set({ llmConfig }),
+  setGlobalLlmConfig: (globalLlmConfig) => set({ globalLlmConfig }),
   setProviderConfigs: (providerConfigs) => set({ providerConfigs }),
+  setCustomLlmPresets: (customLlmPresets) => set({ customLlmPresets }),
   setActivePresetId: (activePresetId) => set({ activePresetId }),
+  setTaskModelRouting: (taskModelRouting) => set({ taskModelRouting }),
+  setProjectLlmOverride: (projectLlmOverride) => set({ projectLlmOverride }),
   setSearchApiConfig: (searchApiConfig) => set({ searchApiConfig }),
   setEmbeddingConfig: (embeddingConfig) => set({ embeddingConfig }),
   setMultimodalConfig: (multimodalConfig) => set({ multimodalConfig }),

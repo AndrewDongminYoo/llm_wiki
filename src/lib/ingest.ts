@@ -350,6 +350,7 @@ export interface ParseFileBlocksResult {
    *  one is also console.warn'd. UI can surface these so users see that
    *  something was skipped instead of silently getting fewer pages. */
   warnings: string[]
+  truncatedPaths: string[]
 }
 
 // Line-level openers / closers. Both are case-insensitive, tolerant of
@@ -460,6 +461,7 @@ export function parseFileBlocks(text: string): ParseFileBlocksResult {
 
   const blocks: ParsedFileBlock[] = []
   const warnings: string[] = []
+  const truncatedPaths: string[] = []
 
   let i = 0
   while (i < lines.length) {
@@ -520,6 +522,7 @@ export function parseFileBlocks(text: string): ParseFileBlocksResult {
       const msg = `FILE block "${pathLabel}" was not closed before end of stream — likely truncation (model hit max_tokens, timeout, or connection dropped). Block dropped.`
       console.warn(`[ingest] ${msg}`)
       warnings.push(msg)
+      if (isSafeIngestPath(path)) truncatedPaths.push(path)
       continue
     }
 
@@ -543,7 +546,7 @@ export function parseFileBlocks(text: string): ParseFileBlocksResult {
     blocks.push({ path, content: contentLines.join("\n") })
   }
 
-  return { blocks, warnings }
+  return { blocks, warnings, truncatedPaths }
 }
 
 /**
@@ -601,6 +604,17 @@ export function formatIngestWarningLogEntry(
     ...warnings.map((warning, index) => `${index + 1}. ${warning}`),
     "",
   ].join("\n")
+}
+
+export function buildDeterministicIngestLog(
+  existing: string,
+  sourceIdentity: string,
+  date = currentWikiDate(),
+): string {
+  const entry = `## [${date}] ingest | ${sourceIdentity}`
+  return existing.trim()
+    ? `${existing.trimEnd()}\n\n${entry}\n`
+    : `# Wiki Log\n\n${entry}\n`
 }
 
 async function appendIngestWarningLog(
@@ -1111,77 +1125,65 @@ async function autoIngestImpl(
   const writtenPaths = writeResult.writtenPaths
   const writeWarnings = writeResult.warnings
   const hardFailures = writeResult.hardFailures
-
-  try {
-    if (await updateWikiIndexDeterministically(pp, writtenPaths)) {
-      writtenPaths.push("wiki/index.md")
-      onFileWritten?.("wiki/index.md")
-    }
-  } catch (err) {
-    writeWarnings.push(
-      `Deterministic index update failed: ${err instanceof Error ? err.message : String(err)}`,
-    )
-  }
-
-  const aggregateRepairPaths = aggregatePathsNeedingRepair(writtenPaths, writeWarnings)
-  const repairableAggregatePaths = aggregateRepairPaths.filter((path) =>
-    isAggregateRepairSafe(path, index, overview, llmConfig.maxContextSize),
+  let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
+    writeResult.truncatedPaths.filter((path) =>
+      !writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))
+    ),
   )
-  const skippedAggregatePaths = aggregateRepairPaths.filter((path) =>
-    !repairableAggregatePaths.includes(path),
-  )
-  if (skippedAggregatePaths.length > 0) {
-    writeWarnings.push(
-      `Skipped aggregate repair for ${skippedAggregatePaths.join(", ")} because the existing file is too large to safely regenerate without truncating existing entries.`,
-    )
-  }
-  if (repairableAggregatePaths.length > 0 && !signal?.aborted) {
+
+  if (unrecoveredTruncatedPaths.length > 0 && !signal?.aborted) {
     activity.updateItem(activityId, {
-      detail: `Repairing aggregate wiki files: ${repairableAggregatePaths.join(", ")}`,
+      detail: `Retrying truncated wiki files: ${unrecoveredTruncatedPaths.join(", ")}`,
     })
-    let aggregateRepairOutput = ""
+    let repairOutput = ""
+    let repairFailed = false
     try {
       await streamChat(
         llmConfig,
         [
           {
             role: "system",
-            content: buildAggregateRepairPrompt(
-              repairableAggregatePaths,
-              purpose,
-              index,
-              overview,
+            content: buildTruncatedFileRepairPrompt(
+              unrecoveredTruncatedPaths,
               sourceIdentity,
-              analysis,
-              sourceContext,
-              generation,
-              llmConfig.maxContextSize,
+              {
+                schema,
+                purpose,
+                analysis,
+                sourceContext,
+                maxContextSize: llmConfig.maxContextSize,
+              },
             ),
           },
           {
             role: "user",
-            content: "Emit the requested aggregate FILE blocks now. Start immediately with `---FILE:`.",
+            content: "Regenerate the requested FILE blocks now. Start immediately with `---FILE:`.",
           },
         ],
         {
-          onToken: (token) => { aggregateRepairOutput += token },
+          onToken: (token) => { repairOutput += token },
           onDone: () => {},
           onError: (err) => {
-            writeWarnings.push(`Aggregate repair failed: ${err.message}`)
+            repairFailed = true
+            writeWarnings.push(`Truncated FILE repair failed: ${err.message}`)
           },
         },
         signal,
         {
           temperature: 0.1,
           reasoning: { mode: "off" },
-          max_tokens: computeIngestReviewMaxTokens(llmConfig.maxContextSize),
+          // A repair must regenerate the complete FILE body. Reusing the
+          // smaller review budget can immediately truncate the same long page
+          // that exhausted the original response.
+          max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
         },
       )
       throwIfIngestAborted(signal, activityId)
-      if (aggregateRepairOutput.trim()) {
-        const filteredRepair = filterAggregateRepairOutput(
-          aggregateRepairOutput,
-          repairableAggregatePaths,
+
+      if (!repairFailed && repairOutput.trim()) {
+        const filteredRepair = filterTruncatedFileRepairOutput(
+          repairOutput,
+          unrecoveredTruncatedPaths,
         )
         writeWarnings.push(...filteredRepair.warnings)
         const repairResult = await writeFileBlocks(
@@ -1194,14 +1196,66 @@ async function autoIngestImpl(
           activityId,
           onFileWritten,
         )
-        writtenPaths.push(...repairResult.writtenPaths)
+        // Match successful writes against the paths requested from the model,
+        // not the final on-disk paths. writeFileBlocks may legitimately rewrite
+        // a title-derived filename for the selected output language.
+        const completedInputPathKeys = new Set(
+          repairResult.completedInputPaths.map(normalizePath),
+        )
+        const recoveredPaths = filteredRepair.paths.filter((path) =>
+          completedInputPathKeys.has(normalizePath(path)),
+        )
+        for (const path of repairResult.writtenPaths) {
+          if (!writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))) {
+            writtenPaths.push(path)
+          }
+        }
+        for (const path of recoveredPaths) {
+          const warningPrefix = `FILE block "${path}" was not closed before end of stream`
+          for (let i = writeWarnings.length - 1; i >= 0; i--) {
+            if (writeWarnings[i].startsWith(warningPrefix)) writeWarnings.splice(i, 1)
+          }
+        }
         writeWarnings.push(...repairResult.warnings)
         hardFailures.push(...repairResult.hardFailures)
+        const recoveredPathKeys = new Set(recoveredPaths.map(normalizePath))
+        unrecoveredTruncatedPaths = unrecoveredTruncatedPaths.filter((path) =>
+          !recoveredPathKeys.has(normalizePath(path))
+        )
       }
     } catch (err) {
       throwIfIngestAborted(signal, activityId)
       writeWarnings.push(
-        `Aggregate repair failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Truncated FILE repair failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  try {
+    if (await updateWikiIndexDeterministically(pp, writtenPaths)) {
+      writtenPaths.push("wiki/index.md")
+      onFileWritten?.("wiki/index.md")
+    }
+  } catch (err) {
+    writeWarnings.push(
+      `Deterministic index update failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  // log.md is append-only structural metadata. If the model omitted its FILE
+  // block, write a deterministic entry instead of starting another LLM turn.
+  // This keeps multi-file imports at two generation stages per source and
+  // prevents a slow provider from making the queue appear stuck in "repair".
+  if (!writtenPaths.some((path) => normalizePath(path).toLowerCase() === "wiki/log.md") && !signal?.aborted) {
+    try {
+      const logPath = `${pp}/wiki/log.md`
+      const existingLog = await tryReadFile(logPath)
+      await writeFile(logPath, buildDeterministicIngestLog(existingLog, sourceIdentity))
+      writtenPaths.push("wiki/log.md")
+      onFileWritten?.("wiki/log.md")
+    } catch (err) {
+      writeWarnings.push(
+        `Deterministic log update failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
   }
@@ -1269,22 +1323,20 @@ async function autoIngestImpl(
   }
 
   // ── Step 5: Save to cache ───────────────────────────────────
-  // Skip cache when ANY block hit a hard FS failure: we'd otherwise
-  // freeze the partial-write result into the cache and a future
-  // re-ingest of the same source would silently replay only the
-  // pages that succeeded the first time, never giving the user a
-  // chance to recover the failed ones. Soft drops (language
-  // mismatch, path-traversal rejection, empty-path) are NOT failures
-  // — they represent deterministic decisions and caching them is
-  // safe.
-  if (writtenPaths.length > 0 && hardFailures.length === 0) {
+  // Skip cache when a write fails or a truncated path remains unrecovered;
+  // otherwise the partial result would be replayed without another LLM turn.
+  if (
+    writtenPaths.length > 0 &&
+    hardFailures.length === 0 &&
+    unrecoveredTruncatedPaths.length === 0
+  ) {
     await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
     }
-  } else if (hardFailures.length > 0) {
+  } else if (hardFailures.length > 0 || unrecoveredTruncatedPaths.length > 0) {
     console.warn(
-      `[ingest] Skipping cache save for "${sourceIdentity}" — ${hardFailures.length} block(s) failed to write: ${hardFailures.join(", ")}`,
+      `[ingest] Skipping cache save for "${sourceIdentity}" — ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated FILE block(s) still missing.`,
     )
   }
 
@@ -1420,16 +1472,6 @@ export function rewriteIngestPathFromTitleForTargetLanguage(
   return isSafeIngestPath(nextPath) ? nextPath : relativePath
 }
 
-export function aggregatePathsNeedingRepair(writtenPaths: string[], warnings: string[]): string[] {
-  const written = new Set(writtenPaths.map((path) => normalizePath(path)))
-  const warningText = warnings.join("\n")
-  // index.md is maintained deterministically and overview.md is intentionally
-  // bounded/stable. Only the append-only log still needs an LLM repair block.
-  return AGGREGATE_WIKI_PATHS.filter((path) => path === "wiki/log.md").filter((path) =>
-    !written.has(path) || warningText.includes(`"${path}"`),
-  )
-}
-
 async function updateWikiIndexDeterministically(
   projectPath: string,
   writtenPaths: string[],
@@ -1485,44 +1527,6 @@ export function updateBoundedRecentIndexSection(index: string, additions: string
   const suffix = sectionEnd >= 0 ? lines.slice(sectionEnd) : []
   const recent = Array.from(new Set([...additions, ...existing])).slice(0, 200)
   return [...prefix, "", section, ...recent, ...(suffix.length ? ["", ...suffix] : []), ""].join("\n")
-}
-
-export function filterAggregateRepairOutput(text: string, allowedPaths: string[]): {
-  text: string
-  warnings: string[]
-} {
-  const allowed = new Set(allowedPaths.map((path) => normalizePath(path)))
-  const { blocks, warnings } = parseFileBlocks(text)
-  const kept = blocks.filter((block) => allowed.has(normalizePath(block.path)))
-  const dropped = blocks.filter((block) => !allowed.has(normalizePath(block.path)))
-  if (dropped.length > 0) {
-    warnings.push(
-      `Dropped ${dropped.length} non-aggregate block(s) from aggregate repair output: ${dropped.map((block) => block.path).join(", ")}`,
-    )
-  }
-  return {
-    text: kept
-      .map((block) => `---FILE: ${block.path}---\n${block.content.trimEnd()}\n---END FILE---`)
-      .join("\n\n"),
-    warnings,
-  }
-}
-
-function aggregateRepairSectionCap(maxContextSize: number | undefined): number {
-  const { maxCtx } = computeContextBudget(maxContextSize)
-  return Math.max(4_000, Math.floor(maxCtx * 0.12))
-}
-
-function isAggregateRepairSafe(
-  path: string,
-  index: string,
-  overview: string,
-  maxContextSize: number | undefined,
-): boolean {
-  const cap = aggregateRepairSectionCap(maxContextSize)
-  if (path === "wiki/index.md") return index.length <= cap
-  if (path === "wiki/overview.md") return overview.length <= cap
-  return true
 }
 
 function isValidSourceReference(source: string, activeSourceIdentity: string): boolean {
@@ -1790,10 +1794,20 @@ async function writeFileBlocks(
   signal?: AbortSignal,
   activityId?: string,
   onFileWritten?: (relativePath: string) => void,
-): Promise<{ writtenPaths: string[]; warnings: string[]; hardFailures: string[] }> {
-  const { blocks, warnings: parseWarnings } = parseFileBlocks(text)
+): Promise<{
+  writtenPaths: string[]
+  completedInputPaths: string[]
+  warnings: string[]
+  hardFailures: string[]
+  truncatedPaths: string[]
+}> {
+  const { blocks, warnings: parseWarnings, truncatedPaths } = parseFileBlocks(text)
   const warnings = [...parseWarnings]
   const writtenPaths: string[] = []
+  // Keep the model-requested path separate from the final path. Path
+  // canonicalization may rename the file after parsing, but callers that
+  // repair a specific FILE block still need to know that request succeeded.
+  const completedInputPaths: string[] = []
   // "Hard failures" = blocks we INTENDED to write but the FS rejected
   // (disk full, permission, OS-level errors). Distinct from soft drops
   // (language mismatch, parse warnings, path-traversal rejections):
@@ -1944,6 +1958,7 @@ async function writeFileBlocks(
         await writeFile(fullPath, toWrite)
       }
       writtenPaths.push(relativePath)
+      completedInputPaths.push(rawRelativePath)
       onFileWritten?.(relativePath)
     } catch (err) {
       const msg = `Failed to write "${relativePath}": ${err instanceof Error ? err.message : String(err)}`
@@ -1953,7 +1968,13 @@ async function writeFileBlocks(
     }
   }
 
-  return { writtenPaths, warnings, hardFailures }
+  return {
+    writtenPaths,
+    completedInputPaths,
+    warnings,
+    hardFailures,
+    truncatedPaths,
+  }
 }
 
 function isOwnedOnlyBySource(content: string, sourceIdentity: string): boolean {
@@ -2333,60 +2354,91 @@ function buildReviewSuggestionPrompt(
   ].filter(Boolean).join("\n")
 }
 
-function buildAggregateRepairPrompt(
-  paths: string[],
-  purpose: string,
-  index: string,
-  overview: string,
+type TruncatedFileRepairContext = {
+  readonly schema: string
+  readonly purpose: string
+  readonly analysis: string
+  readonly sourceContext: string
+  readonly maxContextSize: number | undefined
+}
+
+function buildTruncatedFileRepairPrompt(
+  paths: readonly string[],
   sourceIdentity: string,
-  analysis: string,
-  sourceContext: string,
-  generation: string,
-  maxContextSize: number | undefined,
+  context: TruncatedFileRepairContext,
 ): string {
-  const sectionCap = aggregateRepairSectionCap(maxContextSize)
-  const today = currentWikiDate()
+  const { schema, purpose, analysis, sourceContext, maxContextSize } = context
+  const { maxCtx } = computeContextBudget(maxContextSize)
+  const sectionCap = Math.max(4_000, Math.floor(maxCtx * 0.12))
   return [
-    "You are repairing aggregate wiki files after an ingest generation.",
-    "Do not output chain-of-thought, hidden reasoning, or explanatory preamble.",
+    "You are repairing truncated wiki FILE blocks from an earlier generation.",
+    "Return exactly one complete FILE block for each requested path and no other files.",
+    "Every block must end with `---END FILE---`. Do not output a preamble, REVIEW blocks, or trailing commentary.",
+    "Preserve the requested paths exactly and include the source identity in each page's frontmatter `sources` field.",
     "",
     languageRule(sourceContext),
     "",
-    "Generate ONLY the requested aggregate FILE blocks listed below.",
-    "Do not generate entity, concept, source summary, query, comparison, or synthesis pages.",
-    "",
-    "Requested paths:",
+    "## Requested paths",
     ...paths.map((path) => `- ${path}`),
     "",
-    "Rules:",
-    `- Use today's date ${today} for log entries and frontmatter dates.`,
-    "- For wiki/index.md: output the complete updated index, preserving existing entries and adding the new source-derived entries.",
-    "- For wiki/overview.md: output the complete updated overview, reflecting the full wiki plus this new source.",
-    "- For wiki/log.md: output only the new log entry to append, format `## [YYYY-MM-DD] ingest | Title`.",
-    "- Output only FILE blocks. Nothing else.",
-    "",
-    "FILE block template:",
-    "```",
-    "---FILE: wiki/path.md---",
-    "(complete file content, or just the new log entry for wiki/log.md)",
-    "---END FILE---",
-    "```",
-    "",
-    purpose ? `## Wiki Purpose\n${trimLongText(purpose, Math.floor(sectionCap * 0.5))}` : "",
-    index ? `## Current Wiki Index\n${trimLongText(index, sectionCap)}` : "",
-    overview ? `## Current Overview\n${trimLongText(overview, sectionCap)}` : "",
-    "",
-    `## Source\n${sourceIdentity}`,
-    "",
-    "## Stage 1 Analysis",
-    trimLongText(analysis, sectionCap),
-    "",
-    "## Source Context",
-    trimLongText(sourceContext, sectionCap),
-    "",
-    "## First Generation Output",
-    trimLongText(generation, sectionCap),
+    `## Source identity\n${sourceIdentity}`,
+    schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
+    purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
+    `## Stage 1 analysis\n${trimLongText(analysis, sectionCap)}`,
+    `## Source context\n${trimLongText(sourceContext, sectionCap)}`,
   ].filter(Boolean).join("\n")
+}
+
+export function filterTruncatedFileRepairOutput(
+  text: string,
+  allowedPaths: readonly string[],
+): { text: string; paths: string[]; warnings: string[] } {
+  const allowed = new Set(allowedPaths.map(normalizePath))
+  const { blocks, warnings } = parseFileBlocks(text)
+  const seen = new Set<string>()
+  const kept: ParsedFileBlock[] = []
+  const dropped: ParsedFileBlock[] = []
+  const duplicates: ParsedFileBlock[] = []
+  for (const block of blocks) {
+    const pathKey = normalizePath(block.path)
+    if (!allowed.has(pathKey)) {
+      dropped.push(block)
+      continue
+    }
+    if (seen.has(pathKey)) {
+      duplicates.push(block)
+      continue
+    }
+    seen.add(pathKey)
+    kept.push(block)
+  }
+  if (dropped.length > 0) {
+    warnings.push(
+      `Dropped ${dropped.length} unrequested FILE block(s) from truncated repair output: ${dropped.map((block) => block.path).join(", ")}`,
+    )
+  }
+  if (duplicates.length > 0) {
+    warnings.push(
+      `Dropped ${duplicates.length} duplicate FILE block(s) from truncated repair output: ${duplicates.map((block) => block.path).join(", ")}`,
+    )
+  }
+  return {
+    text: kept
+      .map((block) => `---FILE: ${block.path}---\n${block.content.trimEnd()}\n---END FILE---`)
+      .join("\n\n"),
+    paths: kept.map((block) => block.path),
+    warnings,
+  }
+}
+
+function uniqueNormalizedPaths(paths: readonly string[]): string[] {
+  const seen = new Set<string>()
+  return paths.filter((path) => {
+    const key = normalizePath(path)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function getStore() {

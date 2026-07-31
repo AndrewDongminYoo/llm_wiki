@@ -167,8 +167,17 @@
     "importHint": "Import documents to start building your wiki",
     "importFiles": "Import Files",
     "importFolder": "Folder",
+    "importUrls": "URLs",
     "importSourceFiles": "Import Source Files",
     "importSourceFolder": "Import Source Folder",
+    "urlImport": {
+      "title": "Import web pages",
+      "description": "Enter one HTTP(S) URL per line. Each page is saved as a source and queued for ingest; failed URLs do not stop the rest of the batch.",
+      "placeholder": "https://example.com/article-one\nhttps://example.com/article-two",
+      "submit": "Import URLs",
+      "empty": "Enter at least one URL.",
+      "imported": "Imported"
+    },
     "refresh": "Refresh",
     "refreshFolder": "Refresh folder",
     "refreshingFolder": "Refreshing...",
@@ -257,10 +266,11 @@
     },
     "agentMode": "Agent mode",
     "retrievalMode": "Retrieval mode",
-    "retrievalModeHint": "Standard keeps the existing retrieval behavior. Smart iteratively closes evidence gaps under a strict budget.",
+    "retrievalModeHint": "Standard keeps the existing behavior. Smart iteratively closes evidence gaps. Raw sources only answers exclusively from original source excerpts.",
     "retrievalModes": {
       "standard": "Standard retrieval",
-      "smart": "Smart retrieval"
+      "smart": "Smart retrieval",
+      "faithful": "Raw sources only"
     },
     "agentModes": {
       "fast": "Fast",
@@ -335,6 +345,8 @@
     "title": "Wiki Lint",
     "semantic": "Semantic (LLM)",
     "running": "Running...",
+    "cancel": "Cancel check",
+    "cancelProgress": "Cancel {{completed}}/{{total}}",
     "runLint": "Run Lint",
     "runLintHint": "Run lint to check wiki health",
     "runLintDescription": "Checks for orphan pages, broken links, and more",
@@ -455,7 +467,27 @@
       },
       "llm": {
         "title": "LLM Models",
-        "description": "One row per vendor. Toggling one on automatically turns off the others. Changes save instantly; each vendor's API key is stored independently so switching doesn't lose data.",
+        "description": "Configure built-in providers or add multiple custom endpoints. Activating one automatically deactivates the others, while every provider keeps its own credentials and model settings.",
+        "taskRouting": {
+          "chat": "Chat model",
+          "ingest": "Ingest model",
+          "activeDefault": "Use active model",
+          "hint": "Choose separate models for interactive chat and document ingest. The active model remains the fallback."
+        },
+      "projectOverride": {
+          "enabled": "Use a project-specific model",
+          "provider": "Project provider",
+          "selectProvider": "Select a provider",
+          "model": "Project model",
+          "modelPlaceholder": "Use the provider's configured model",
+          "hint": "When enabled, this project uses the selected provider and model for both Chat and Ingest. Credentials remain in the global provider settings."
+        },
+        "customProfiles": {
+          "add": "Add custom provider",
+          "defaultName": "Custom provider {{number}}",
+          "name": "Provider name",
+          "delete": "Delete custom provider"
+        },
         "expand": "Expand config",
         "collapse": "Collapse",
         "toggleOff": "Click to deactivate",
@@ -489,6 +521,12 @@
         "codexCliTimeoutHint": "Overall timeout for one Codex CLI request. Raise this for long PDF ingest or slower local/network sessions.",
         "requestTimeout": "Request timeout (minutes)",
         "requestTimeoutHint": "Increase this for slow local CPU models. The default is 30 minutes.",
+        "streamingOutput": "Stream responses",
+        "streamingOutputHint": "When disabled, HTTP providers wait for the complete response before displaying it. CLI providers still use their native protocol but buffer visible output until completion.",
+        "streamingOutputOn": "Streaming on: response text appears as it is generated.",
+        "streamingOutputOff": "Streaming off: response text appears after generation completes.",
+        "customHeaders": "Custom request headers",
+        "customHeadersHint": "Optional. Enter one Header-Name: value per line. Content-Type and configured API-key headers take precedence.",
         "cliStatus": "CLI status",
         "checkingCli": "Checking…",
         "recheckCli": "Re-check",
@@ -545,6 +583,10 @@
         "maxChunkCharsHint": "Target size of each chunk. Lower this (e.g. 500) when your endpoint's context is small (llama.cpp n_ctx=512, mxbai-embed-large, etc.).",
         "overlapChunkChars": "Overlap (characters)",
         "overlapChunkCharsHint": "Characters of overlap between adjacent chunks so ideas aren't severed at boundaries.",
+        "concurrency": "Concurrent requests",
+        "concurrencyHint": "Maximum embedding requests in flight (1–32). Increase gradually according to your endpoint's capacity.",
+        "batchSize": "Inputs per request",
+        "batchSizeHint": "OpenAI-compatible endpoints only (1–64). Unsupported providers automatically use single-input requests.",
         "providerTests": "Provider tests",
         "providerTestsHint": "Connection test sends one short embedding request. Functional test verifies stable finite vectors and reports the returned dimension.",
         "testConnection": "Test connection",
@@ -625,6 +667,7 @@
         "savedBadge": "Saved",
         "instanceUrl": "Instance URL",
         "ollamaHint": "Uses the official Ollama Web Search API (`https://ollama.com/api/web_search`). An Ollama API key is required.",
+        "bochaHint": "Uses the official Bocha Web Search API. Create and manage API keys at open.bocha.cn.",
         "firecrawlHint": "Leave API key blank for anonymous search, or add a Firecrawl API key for authenticated quota. Base URL supports compatible self-hosted endpoints.",
         "searxngJsonHint": "The instance must allow JSON search responses (`format=json`).",
         "searchCategories": "Search categories",
@@ -905,7 +948,10 @@
     "historyRestore": "Restore this version",
     "pdfText": "Text",
     "pdfDocument": "PDF",
-    "pdfPage": "Page"
+    "pdfPage": "Page",
+    "pdfLoading": "Loading PDF...",
+    "pdfLoadError": "The PDF could not be rendered. You can retry or open it with the system app.",
+    "pdfTooLarge": "This PDF is too large for the in-app preview. Open it with the system app."
   },
   "activity": {
     "processing": "Processing: {{title}}",

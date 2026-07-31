@@ -63,9 +63,36 @@ interface ProviderConfig {
   headers: Record<string, string>
   buildBody: (messages: ChatMessage[], overrides?: RequestOverrides) => unknown
   parseStream: (line: string) => string | null
+  parseResponse: (payload: unknown) => string
+  streaming: boolean
 }
 
 const JSON_CONTENT_TYPE = "application/json"
+const HTTP_HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+
+/**
+ * Merge user-supplied gateway headers with protocol headers. Names are
+ * compared case-insensitively so a differently-cased duplicate cannot bypass
+ * authentication precedence. Invalid names and CR/LF values are ignored at
+ * this boundary because persisted settings may predate UI validation.
+ */
+export function mergeLlmRequestHeaders(
+  custom: Record<string, string> | undefined,
+  required: Record<string, string>,
+): Record<string, string> {
+  const merged = new Map<string, [string, string]>()
+  for (const [name, value] of Object.entries(custom ?? {})) {
+    const trimmedName = name.trim()
+    const trimmedValue = value.trim()
+    if (!HTTP_HEADER_NAME_RE.test(trimmedName) || !trimmedValue || /[\r\n]/.test(trimmedValue)) continue
+    merged.set(trimmedName.toLowerCase(), [trimmedName, trimmedValue])
+  }
+  for (const [name, value] of Object.entries(required)) {
+    if (!value) continue
+    merged.set(name.toLowerCase(), [name, value])
+  }
+  return Object.fromEntries(merged.values())
+}
 
 /**
  * Origin header for local-LLM endpoints (Ollama, LM Studio, llama.cpp
@@ -150,6 +177,38 @@ function parseOpenAiLine(line: string): string | null {
   } catch {
     return null
   }
+}
+
+function textFromUnknownContent(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return ""
+      const value = part as Record<string, unknown>
+      return typeof value.text === "string" ? value.text : ""
+    })
+    .join("")
+}
+
+export function parseOpenAiResponse(payload: unknown): string {
+  const root = payload as { choices?: Array<{ message?: { content?: unknown } }> }
+  return textFromUnknownContent(root?.choices?.[0]?.message?.content)
+}
+
+export function parseAnthropicResponse(payload: unknown): string {
+  const root = payload as { content?: unknown }
+  return textFromUnknownContent(root?.content)
+}
+
+export function parseGoogleResponse(payload: unknown): string {
+  const root = payload as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>
+  }
+  return (root?.candidates?.[0]?.content?.parts ?? [])
+    .filter((part) => !part.thought)
+    .map((part) => part.text ?? "")
+    .join("")
 }
 
 export function parseAnthropicLine(line: string): string | null {
@@ -259,6 +318,7 @@ function toOpenAiContent(content: string | ContentBlock[]): unknown {
 function buildOpenAiBody(
   messages: ChatMessage[],
   overrides?: RequestOverrides,
+  streaming = true,
 ): Record<string, unknown> {
   // OpenAI (and every /v1/chat/completions clone — DeepSeek, Groq,
   // Ollama, Zhipu, Kimi, xAI, MiniMax OpenAI-compat, ...) accepts these
@@ -267,7 +327,7 @@ function buildOpenAiBody(
     role: m.role,
     content: toOpenAiContent(m.content),
   }))
-  return { messages: translated, stream: true, ...stripWireAgnosticOverrides(overrides) }
+  return { messages: translated, stream: streaming, ...stripWireAgnosticOverrides(overrides) }
 }
 
 function stripWireAgnosticOverrides(overrides?: RequestOverrides): Omit<RequestOverrides, "reasoning"> {
@@ -388,10 +448,15 @@ function buildOpenAiCompatibleBody(
   config: LlmConfig,
   messages: ChatMessage[],
   overrides?: RequestOverrides,
+  streaming = true,
 ): Record<string, unknown> {
   assertBigModelImageSupport(config, messages)
   const reasoning = effectiveReasoning(config, overrides)
-  const body: Record<string, unknown> = buildOpenAiBody(messages, stripWireAgnosticOverrides(overrides))
+  const body: Record<string, unknown> = buildOpenAiBody(
+    messages,
+    stripWireAgnosticOverrides(overrides),
+    streaming,
+  )
   adaptOpenAiStrictCompletionBody(config, body)
   adaptKimiBody(config, body)
   adaptXiaomiMimoBody(config, body, reasoning)
@@ -515,6 +580,7 @@ function buildAnthropicSystem(systemText: string): unknown[] | undefined {
 function buildAnthropicBody(
   messages: ChatMessage[],
   overrides?: RequestOverrides,
+  streaming = true,
 ): Record<string, unknown> {
   const systemMessages = messages.filter((m) => m.role === "system")
   const conversationMessages = messages
@@ -531,7 +597,7 @@ function buildAnthropicBody(
   return {
     messages: conversationMessages,
     ...(system !== undefined ? { system } : {}),
-    stream: true,
+    stream: streaming,
     max_tokens: overrides?.max_tokens ?? 4096,
     ...(overrides?.temperature !== undefined ? { temperature: overrides.temperature } : {}),
     ...(overrides?.top_p !== undefined ? { top_p: overrides.top_p } : {}),
@@ -546,8 +612,9 @@ function buildAnthropicBodyWithReasoning(
   config: LlmConfig,
   messages: ChatMessage[],
   overrides?: RequestOverrides,
+  streaming = true,
 ): Record<string, unknown> {
-  const body = buildAnthropicBody(messages, overrides)
+  const body = buildAnthropicBody(messages, overrides, streaming)
   const reasoning = effectiveReasoning(config, overrides)
   if (reasoning.mode === "auto" || reasoning.mode === "off") return body
 
@@ -699,7 +766,8 @@ export function buildAnthropicUrl(base: string): string {
   return `${trimmed}/v1/messages`
 }
 
-function buildAnthropicHeaders(apiKey: string, url: string): Record<string, string> {
+function buildAnthropicHeaders(config: LlmConfig, url: string): Record<string, string> {
+  const apiKey = config.apiKey
   const base: Record<string, string> = {
     "Content-Type": JSON_CONTENT_TYPE,
     "anthropic-version": "2023-06-01",
@@ -710,7 +778,7 @@ function buildAnthropicHeaders(apiKey: string, url: string): Record<string, stri
     base["x-api-key"] = apiKey
     base["anthropic-dangerous-direct-browser-access"] = "true"
   }
-  return base
+  return mergeLlmRequestHeaders(config.customHeaders, base)
 }
 
 /**
@@ -812,6 +880,7 @@ export function deriveAnthropicMaxTokens(maxContextSize: number | undefined): nu
 
 export function getProviderConfig(config: LlmConfig): ProviderConfig {
   const { provider, apiKey, model, ollamaUrl, customEndpoint } = config
+  const streaming = config.streamingEnabled !== false
 
   // Default max_tokens for Anthropic-wire providers, derived from the
   // configured context window rather than a hardcoded 4096. Converts the
@@ -825,30 +894,34 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
     case "openai":
       return {
         url: "https://api.openai.com/v1/chat/completions",
-        headers: {
+        headers: mergeLlmRequestHeaders(config.customHeaders, {
           "Content-Type": JSON_CONTENT_TYPE,
           Authorization: `Bearer ${apiKey}`,
-        },
+        }),
         buildBody: (messages, overrides) => ({
-          ...buildOpenAiCompatibleBody(config, messages, overrides),
+          ...buildOpenAiCompatibleBody(config, messages, overrides, streaming),
           model,
         }),
         parseStream: parseOpenAiLine,
+        parseResponse: parseOpenAiResponse,
+        streaming,
       }
 
     case "anthropic": {
       const url = buildAnthropicUrl("https://api.anthropic.com")
       return {
         url,
-        headers: buildAnthropicHeaders(apiKey, url),
+        headers: buildAnthropicHeaders(config, url),
         buildBody: (messages, overrides) => {
           assertMiniMaxImageSupport(url, model, messages)
           return {
-            ...buildAnthropicBodyWithReasoning(config, messages, { max_tokens: anthropicBudgetTokens, ...overrides }),
+            ...buildAnthropicBodyWithReasoning(config, messages, { max_tokens: anthropicBudgetTokens, ...overrides }, streaming),
             model,
           }
         },
         parseStream: parseAnthropicLine,
+        parseResponse: parseAnthropicResponse,
+        streaming,
       }
     }
 
@@ -859,16 +932,20 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
       // handles that plus any other path-illegal characters.
       const encodedModel = encodeURIComponent(model)
       return {
-        url: `https://generativelanguage.googleapis.com/v1beta/models/${encodedModel}:streamGenerateContent?alt=sse`,
-        headers: {
+        url: streaming
+          ? `https://generativelanguage.googleapis.com/v1beta/models/${encodedModel}:streamGenerateContent?alt=sse`
+          : `https://generativelanguage.googleapis.com/v1beta/models/${encodedModel}:generateContent`,
+        headers: mergeLlmRequestHeaders(config.customHeaders, {
           "Content-Type": JSON_CONTENT_TYPE,
           "x-goog-api-key": apiKey,
-        },
+        }),
         buildBody: (messages, overrides) => buildGoogleBody(messages, {
           ...(overrides ?? {}),
           reasoning: effectiveReasoning(config, overrides),
         }),
         parseStream: parseGoogleLine,
+        parseResponse: parseGoogleResponse,
+        streaming,
       }
     }
 
@@ -879,13 +956,15 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
           model,
           config.azureApiVersion ?? AZURE_OPENAI_API_VERSION,
         ),
-        headers: {
+        headers: mergeLlmRequestHeaders(config.customHeaders, {
           "Content-Type": JSON_CONTENT_TYPE,
           "api-key": apiKey,
-        },
+        }),
         buildBody: (messages, overrides) =>
-          buildOpenAiCompatibleBody(config, messages, overrides),
+          buildOpenAiCompatibleBody(config, messages, overrides, streaming),
         parseStream: parseOpenAiLine,
+        parseResponse: parseOpenAiResponse,
+        streaming,
       }
     }
 
@@ -902,15 +981,17 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
       }
       return {
         url: `${ollamaBase}/v1/chat/completions`,
-        headers: {
+        headers: mergeLlmRequestHeaders(config.customHeaders, {
           "Content-Type": JSON_CONTENT_TYPE,
           ...localLlmOriginHeader(),
-        },
+        }),
         buildBody: (messages, overrides) => ({
-          ...buildOpenAiCompatibleBody(config, messages, overrides),
+          ...buildOpenAiCompatibleBody(config, messages, overrides, streaming),
           model,
         }),
         parseStream: parseOpenAiLine,
+        parseResponse: parseOpenAiResponse,
+        streaming,
       }
     }
 
@@ -923,15 +1004,17 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
       const url = buildAnthropicUrl(customEndpoint || "https://api.minimax.io/anthropic")
       return {
         url,
-        headers: buildAnthropicHeaders(apiKey, url),
+        headers: buildAnthropicHeaders(config, url),
         buildBody: (messages, overrides) => {
           assertMiniMaxImageSupport(url, model, messages)
           return {
-            ...buildAnthropicBodyWithReasoning(config, messages, { max_tokens: anthropicBudgetTokens, ...overrides }),
+            ...buildAnthropicBodyWithReasoning(config, messages, { max_tokens: anthropicBudgetTokens, ...overrides }, streaming),
             model,
           }
         },
         parseStream: parseAnthropicLine,
+        parseResponse: parseAnthropicResponse,
+        streaming,
       }
     }
 
@@ -955,15 +1038,17 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
         const url = buildAnthropicUrl(customEndpoint)
         return {
           url,
-          headers: buildAnthropicHeaders(apiKey, url),
+          headers: buildAnthropicHeaders(config, url),
           buildBody: (messages, overrides) => {
             assertMiniMaxImageSupport(url, model, messages)
             return {
-              ...buildAnthropicBodyWithReasoning(config, messages, { max_tokens: anthropicBudgetTokens, ...overrides }),
+              ...buildAnthropicBodyWithReasoning(config, messages, { max_tokens: anthropicBudgetTokens, ...overrides }, streaming),
               model,
             }
           },
           parseStream: parseAnthropicLine,
+          parseResponse: parseAnthropicResponse,
+          streaming,
         }
       }
       // Defense-in-depth: settings-side EndpointField normalizes URLs on
@@ -983,7 +1068,7 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
       const azure = isAzureOpenAiEndpoint(url)
       return {
         url,
-        headers: {
+        headers: mergeLlmRequestHeaders(config.customHeaders, {
           "Content-Type": JSON_CONTENT_TYPE,
           ...(apiKey
             ? azure
@@ -995,13 +1080,15 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
           // workaround. Public custom gateways may reject unexpected
           // browser Origin headers, so leave them untouched.
           ...(!azure && isLocalOrPrivateHttpEndpoint(url) ? localLlmOriginHeader() : {}),
-        },
+        }),
         buildBody: (messages, overrides) => {
-          const body = buildOpenAiCompatibleBody(config, messages, overrides)
+          const body = buildOpenAiCompatibleBody(config, messages, overrides, streaming)
           if (!azure) body.model = model
           return body
         },
         parseStream: parseOpenAiLine,
+        parseResponse: parseOpenAiResponse,
+        streaming,
       }
     }
 
