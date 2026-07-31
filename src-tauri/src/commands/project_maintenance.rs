@@ -76,7 +76,6 @@ mod tests {
         let _ = fs::remove_dir_all(target);
         let _ = fs::remove_file(archive);
     }
-
 }
 
 #[tauri::command]
