@@ -185,6 +185,35 @@ describe("normalizeBlockScalarsInFrontmatter (via sanitizeIngestedFileContent)",
     expect(out).toMatch(/\r\n--- \r\n\r\n# Body$/)
   })
 
+  it("changes only the block scalar while preserving surrounding YAML formatting", () => {
+    const input = [
+      "--- ",
+      "# keep this comment",
+      "type: entity",
+      "title: 'Quoted: title'",
+      "description: >-",
+      "  A folded description",
+      "  with two lines.",
+      "tags: [foo, \"bar\"] # keep inline comment",
+      "--- ",
+      "",
+      "# Body",
+    ].join("\r\n")
+    const expected = [
+      "--- ",
+      "# keep this comment",
+      "type: entity",
+      "title: 'Quoted: title'",
+      "description: A folded description with two lines.",
+      "tags: [foo, \"bar\"] # keep inline comment",
+      "--- ",
+      "",
+      "# Body",
+    ].join("\r\n")
+
+    expect(sanitizeIngestedFileContent(input)).toBe(expected)
+  })
+
   it("is a no-op when frontmatter has no block scalar indicators", () => {
     const input = "---\ntype: entity\ntitle: Short\ndescription: A plain description.\n---\n\n# Body"
     expect(sanitizeIngestedFileContent(input)).toBe(input)
