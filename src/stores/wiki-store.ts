@@ -45,6 +45,10 @@ interface LlmConfig {
   codexCliTimeoutMinutes?: number
   /** HTTP LLM request backstop. Defaults to 30 minutes for legacy configs. */
   requestTimeoutMinutes?: number
+  /** Defaults to true. HTTP providers use a non-streaming wire when false. */
+  streamingEnabled?: boolean
+  /** Optional headers added to every HTTP request for this provider preset. */
+  customHeaders?: Record<string, string>
 }
 
 export type SearchProvider =
@@ -53,6 +57,7 @@ export type SearchProvider =
   | "searxng"
   | "ollama"
   | "brave"
+  | "bocha"
   | "firecrawl"
   | "none"
 export type DeepResearchSource = "web" | "anytxt" | "both"
@@ -323,6 +328,8 @@ export interface ProviderOverride {
   localCliIsolation?: boolean
   codexCliTimeoutMinutes?: number
   requestTimeoutMinutes?: number
+  streamingEnabled?: boolean
+  customHeaders?: Record<string, string>
 }
 
 export type ProviderConfigs = Record<string, ProviderOverride>
@@ -350,7 +357,7 @@ export interface ProjectLlmOverride {
    * providerConfigs[presetId], so rotating a key never requires rewriting
    * every project override and credentials are not duplicated per project.
    */
-  profile?: Omit<LlmConfig, "apiKey">
+  profile?: Omit<LlmConfig, "apiKey" | "customHeaders">
 }
 
 export interface ExternalPreview {

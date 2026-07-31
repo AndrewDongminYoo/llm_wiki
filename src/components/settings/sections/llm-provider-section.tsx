@@ -15,6 +15,26 @@ import { testLlmConnection, testLlmFunction, type ProviderTestResult } from "@/l
 import { projectLlmProfile, resolveProjectLlmConfig } from "@/lib/llm-task-routing"
 import { saveProjectLlmOverride } from "@/lib/project-store"
 
+const HTTP_HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+
+export function llmHeadersToText(headers: Record<string, string> | undefined): string {
+  return Object.entries(headers ?? {}).map(([name, value]) => `${name}: ${value}`).join("\n")
+}
+
+export function parseLlmHeadersText(text: string): Record<string, string> {
+  const headers: Record<string, string> = {}
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    const separator = line.indexOf(":")
+    if (separator <= 0) continue
+    const name = line.slice(0, separator).trim()
+    const value = line.slice(separator + 1).trim()
+    if (HTTP_HEADER_NAME_RE.test(name) && value && !/[\r\n]/.test(value)) headers[name] = value
+  }
+  return headers
+}
+
 export function LlmProviderSection() {
   const { t } = useTranslation()
   const providerConfigs = useWikiStore((s) => s.providerConfigs)
@@ -362,9 +382,12 @@ function PresetRow({
   const localCliIsolation = ov.localCliIsolation === true
   const codexCliTimeoutMinutes = Math.max(1, Math.min(240, ov.codexCliTimeoutMinutes ?? 10))
   const requestTimeoutMinutes = Math.max(1, Math.min(1440, ov.requestTimeoutMinutes ?? 30))
+  const streamingEnabled = ov.streamingEnabled !== false
+  const [headersText, setHeadersText] = useState(() => llmHeadersToText(ov.customHeaders))
   const isLocalCliProvider = preset.provider === "claude-code" || preset.provider === "codex-cli"
   const [testState, setTestState] = useState<ProviderTestState>({ kind: "idle" })
   const hasConfig = !!apiKey || !!ov.baseUrl || !!ov.model || !!ov.azureApiVersion || !!ov.azureModelFamily
+    || Object.keys(ov.customHeaders ?? {}).length > 0 || ov.streamingEnabled === false
   // Local CLI providers authenticate via their own existing login state
   // (inherited by the spawned subprocess), so no API key field is shown.
   // Ollama ditto for its local-only model.
@@ -666,7 +689,62 @@ function PresetRow({
             />
           </div>
 
+          <div className="space-y-2 rounded-md border p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium">
+                  {t("settings.sections.llm.streamingOutput")}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("settings.sections.llm.streamingOutputHint")}
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={streamingEnabled}
+                onClick={() => onChange({ streamingEnabled: !streamingEnabled })}
+                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors ${
+                  streamingEnabled
+                    ? "border-primary bg-primary"
+                    : "border-muted-foreground/30 bg-muted-foreground/20 hover:bg-muted-foreground/30"
+                }`}
+                title={streamingEnabled
+                  ? t("settings.sections.llm.streamingOutputOn")
+                  : t("settings.sections.llm.streamingOutputOff")}
+                aria-label={t("settings.sections.llm.streamingOutput")}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-1 ring-black/10 transition-transform ${
+                    streamingEnabled ? "translate-x-4" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            <div className="rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
+              {streamingEnabled
+                ? t("settings.sections.llm.streamingOutputOn")
+                : t("settings.sections.llm.streamingOutputOff")}
+            </div>
+          </div>
+
           {!isLocalCliProvider && (
+            <>
+            <div className="space-y-2">
+              <Label>{t("settings.sections.llm.customHeaders")}</Label>
+              <textarea
+                value={headersText}
+                onChange={(event) => setHeadersText(event.target.value)}
+                onBlur={() => onChange({ customHeaders: parseLlmHeadersText(headersText) })}
+                rows={3}
+                spellCheck={false}
+                placeholder="X-Tenant-ID: team-a"
+                className="w-full resize-y rounded-md border bg-background px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("settings.sections.llm.customHeadersHint")}
+              </p>
+            </div>
             <div className="space-y-2">
               <Label>{t("settings.sections.llm.requestTimeout", "Request timeout (minutes)")}</Label>
               <Input
@@ -682,6 +760,7 @@ function PresetRow({
                 {t("settings.sections.llm.requestTimeoutHint", "Increase this for slow local CPU models. The default is 30 minutes.")}
               </p>
             </div>
+            </>
           )}
 
           <ReasoningControls
