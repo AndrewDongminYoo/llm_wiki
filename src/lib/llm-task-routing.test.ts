@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { projectLlmProfile, resolveProjectLlmConfig, resolveTaskLlmConfig } from "./llm-task-routing"
+import {
+  hydrateTaskModelRoutingProfile,
+  projectLlmProfile,
+  resolveProjectLlmConfig,
+  resolveTaskLlmConfig,
+} from "./llm-task-routing"
 import { disabledLlmConfig } from "@/components/settings/preset-resolver"
 import type { LlmConfig } from "@/stores/wiki-store"
 
@@ -13,6 +18,26 @@ const fallback: LlmConfig = {
 }
 
 describe("resolveTaskLlmConfig", () => {
+  it("migrates a legacy chat route to a credential-free project profile", () => {
+    expect(hydrateTaskModelRoutingProfile(
+      { chatPresetId: "anthropic", ingestPresetId: null },
+      fallback,
+      { anthropic: { apiKey: "shared-secret", model: "claude-sonnet-4-6" } },
+    )).toMatchObject({
+      chatPresetId: "anthropic",
+      ingestPresetId: null,
+      chatProfile: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      },
+    })
+    expect(hydrateTaskModelRoutingProfile(
+      { chatPresetId: "anthropic", ingestPresetId: null },
+      fallback,
+      { anthropic: { apiKey: "shared-secret", model: "claude-sonnet-4-6" } },
+    ).chatProfile).not.toHaveProperty("apiKey")
+  })
+
   it("uses the active global config when no task override is selected", () => {
     expect(resolveTaskLlmConfig("chat", fallback, {}, {
       chatPresetId: null,

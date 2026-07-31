@@ -38,6 +38,18 @@ export function projectLlmProfile(config: LlmConfig): Omit<LlmConfig, "apiKey" |
   return profile
 }
 
+export function hydrateTaskModelRoutingProfile(
+  routing: TaskModelRoutingConfig,
+  fallback: LlmConfig,
+  providerConfigs: ProviderConfigs,
+  customPresets: CustomLlmPreset[] = [],
+): TaskModelRoutingConfig {
+  if (!routing.chatPresetId || routing.chatProfile) return routing
+  const resolved = resolveTaskLlmConfig("chat", fallback, providerConfigs, routing, undefined, customPresets)
+  if (resolved === fallback) return routing
+  return { ...routing, chatProfile: projectLlmProfile(resolved) }
+}
+
 /**
  * Resolve a task-specific provider from the current preset overrides.
  * Routing stores preset ids rather than credential snapshots so API-key,
