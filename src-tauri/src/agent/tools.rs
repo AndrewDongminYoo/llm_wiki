@@ -646,6 +646,7 @@ fn tool_top_k(input: &Value) -> usize {
         .clamp(1, 10)
 }
 
+#[cfg(test)]
 pub fn write_wiki_page_with_options(
     project_path: &str,
     rel_path: &str,
